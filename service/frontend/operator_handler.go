@@ -28,6 +28,8 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -45,6 +47,7 @@ import (
 	"go.temporal.io/server/client/frontend"
 	"go.temporal.io/server/common"
 	clustermetadata "go.temporal.io/server/common/cluster"
+	"go.temporal.io/server/common/headers"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/common/metrics"
@@ -151,7 +154,11 @@ func (h *OperatorHandlerImpl) Start() {
 		common.DaemonStatusInitialized,
 		common.DaemonStatusStarted,
 	) {
+		h.logger.Info("Starting Temporal Operator Service",
+			tag.NewStringTag("service", OperatorServiceName),
+			tag.NewStringTag("version", headers.ServerVersion))
 		h.healthServer.SetServingStatus(OperatorServiceName, healthpb.HealthCheckResponse_SERVING)
+		h.logger.Info("Operator Service health check status set to SERVING")
 	}
 }
 
@@ -162,7 +169,10 @@ func (h *OperatorHandlerImpl) Stop() {
 		common.DaemonStatusStarted,
 		common.DaemonStatusStopped,
 	) {
+		h.logger.Info("Stopping Temporal Operator Service",
+			tag.NewStringTag("service", OperatorServiceName))
 		h.healthServer.SetServingStatus(OperatorServiceName, healthpb.HealthCheckResponse_NOT_SERVING)
+		h.logger.Info("Operator Service health check status set to NOT_SERVING")
 	}
 }
 
@@ -172,26 +182,38 @@ func (h *OperatorHandlerImpl) AddSearchAttributes(
 ) (_ *operatorservice.AddSearchAttributesResponse, retError error) {
 	defer log.CapturePanic(h.logger, &retError)
 
+	h.logger.Info("Starting AddSearchAttributes request",
+		tag.NewStringTag("namespace", request.GetNamespace()),
+		tag.NewInt64("num_attributes", int64(len(request.GetSearchAttributes()))))
+
 	// validate request
 	if request == nil {
+		h.logger.Error("AddSearchAttributes request is nil")
 		return nil, errRequestNotSet
 	}
 
 	if len(request.GetSearchAttributes()) == 0 {
+		h.logger.Error("AddSearchAttributes request has no search attributes")
 		return nil, errSearchAttributesNotSet
 	}
 
 	for saName, saType := range request.GetSearchAttributes() {
 		if searchattribute.IsReserved(saName) {
+			h.logger.Error("Search attribute is reserved",
+				tag.NewStringTag("search_attribute", saName))
 			return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errSearchAttributeIsReservedMessage, saName))
 		}
 		if _, ok := enumspb.IndexedValueType_name[int32(saType)]; !ok {
+			h.logger.Error("Unknown search attribute type",
+				tag.NewStringTag("search_attribute", saName),
+				tag.NewInt64("type", int64(saType)))
 			return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errUnknownSearchAttributeTypeMessage, saType))
 		}
 	}
 
 	var visManagers []manager.VisibilityManager
 	if visManagerDual, ok := h.visibilityMgr.(*visibility.VisibilityManagerDual); ok {
+		h.logger.Info("Using dual visibility manager")
 		visManagers = append(
 			visManagers,
 			visManagerDual.GetPrimaryVisibility(),
@@ -206,11 +228,22 @@ func (h *OperatorHandlerImpl) AddSearchAttributes(
 			storeName = visManager.GetStoreNames()[0]
 			indexName = visManager.GetIndexName()
 		)
+		h.logger.Info("Adding search attributes to store",
+			tag.NewStringTag("store", storeName),
+			tag.NewStringTag("index", indexName))
+
 		if err := h.addSearchAttributesInternal(ctx, request, storeName, indexName); err != nil {
+			h.logger.Error("Failed to add search attributes to store",
+				tag.NewStringTag("store", storeName),
+				tag.Error(err))
 			return nil, fmt.Errorf("Failed to add search attributes to store %s: %w", storeName, err)
 		}
+		h.logger.Info("Successfully added search attributes to store",
+			tag.NewStringTag("store", storeName),
+			tag.NewStringTag("index", indexName))
 	}
 
+	h.logger.Info("Completed AddSearchAttributes request successfully")
 	return &operatorservice.AddSearchAttributesResponse{}, nil
 }
 
@@ -220,8 +253,17 @@ func (h *OperatorHandlerImpl) addSearchAttributesInternal(
 	storeName string,
 	indexName string,
 ) error {
+	h.logger.Info("Starting to add search attributes internally",
+		tag.NewStringTag("store", storeName),
+		tag.NewStringTag("index", indexName),
+		tag.NewStringTag("namespace", request.GetNamespace()))
+
 	currentSearchAttributes, err := h.saManager.GetSearchAttributes(indexName, true)
 	if err != nil {
+		h.logger.Error("Failed to get current search attributes",
+			tag.NewStringTag("store", storeName),
+			tag.NewStringTag("index", indexName),
+			tag.Error(err))
 		return serviceerror.NewUnavailable(fmt.Sprintf(errUnableToGetSearchAttributesMessage, err))
 	}
 
@@ -232,16 +274,38 @@ func (h *OperatorHandlerImpl) addSearchAttributesInternal(
 		)
 	} else if storeName == elasticsearch.PersistenceName {
 		scope := h.metricsHandler.WithTags(metrics.OperationTag(metrics.OperatorAddSearchAttributesScope))
+		h.logger.Info("Adding search attributes to Elasticsearch",
+			tag.NewStringTag("index", indexName),
+			tag.NewStringTag("namespace", request.GetNamespace()))
 		err = h.addSearchAttributesElasticsearch(ctx, request, indexName, currentSearchAttributes)
 		if err != nil {
 			if _, isWorkflowErr := err.(*serviceerror.SystemWorkflow); isWorkflowErr {
 				metrics.AddSearchAttributesWorkflowFailuresCount.With(scope).Record(1)
+				h.logger.Error("Failed to add search attributes to Elasticsearch via workflow",
+					tag.NewStringTag("index", indexName),
+					tag.Error(err))
+			} else {
+				h.logger.Error("Failed to add search attributes to Elasticsearch",
+					tag.NewStringTag("index", indexName),
+					tag.Error(err))
 			}
 		} else {
 			metrics.AddSearchAttributesWorkflowSuccessCount.With(scope).Record(1)
+			h.logger.Info("Successfully added search attributes to Elasticsearch",
+				tag.NewStringTag("index", indexName))
 		}
 	} else {
+		h.logger.Info("Adding search attributes to SQL store",
+			tag.NewStringTag("namespace", request.GetNamespace()))
 		err = h.addSearchAttributesSQL(ctx, request, currentSearchAttributes)
+		if err != nil {
+			h.logger.Error("Failed to add search attributes to SQL store",
+				tag.NewStringTag("namespace", request.GetNamespace()),
+				tag.Error(err))
+		} else {
+			h.logger.Info("Successfully added search attributes to SQL store",
+				tag.NewStringTag("namespace", request.GetNamespace()))
+		}
 	}
 	return err
 }
@@ -402,18 +466,27 @@ func (h *OperatorHandlerImpl) RemoveSearchAttributes(
 ) (_ *operatorservice.RemoveSearchAttributesResponse, retError error) {
 	defer log.CapturePanic(h.logger, &retError)
 
+	h.logger.Info("Starting RemoveSearchAttributes request",
+		tag.NewStringTag("namespace", request.GetNamespace()),
+		tag.NewInt64("num_attributes", int64(len(request.GetSearchAttributes()))))
+
 	// validate request
 	if request == nil {
+		h.logger.Error("RemoveSearchAttributes request is nil")
 		return nil, errRequestNotSet
 	}
 
 	if len(request.GetSearchAttributes()) == 0 {
+		h.logger.Error("RemoveSearchAttributes request has no search attributes")
 		return nil, errSearchAttributesNotSet
 	}
 
 	indexName := h.visibilityMgr.GetIndexName()
 	currentSearchAttributes, err := h.saManager.GetSearchAttributes(indexName, true)
 	if err != nil {
+		h.logger.Error("Failed to get current search attributes",
+			tag.NewStringTag("index", indexName),
+			tag.Error(err))
 		return nil, serviceerror.NewUnavailable(fmt.Sprintf(errUnableToGetSearchAttributesMessage, err))
 	}
 
@@ -423,14 +496,21 @@ func (h *OperatorHandlerImpl) RemoveSearchAttributes(
 	// `skip-schema-update` is set. This is for backward compatibility using
 	// standard visibility.
 	if h.visibilityMgr.HasStoreName(elasticsearch.PersistenceName) || indexName == "" {
+		h.logger.Info("Removing search attributes from Elasticsearch",
+			tag.NewStringTag("index", indexName))
 		err = h.removeSearchAttributesElasticsearch(ctx, request, indexName, currentSearchAttributes)
 	} else {
+		h.logger.Info("Removing search attributes from SQL store")
 		err = h.removeSearchAttributesSQL(ctx, request, currentSearchAttributes)
 	}
 
 	if err != nil {
+		h.logger.Error("Failed to remove search attributes",
+			tag.Error(err))
 		return nil, err
 	}
+
+	h.logger.Info("Completed RemoveSearchAttributes request successfully")
 	return &operatorservice.RemoveSearchAttributesResponse{}, nil
 }
 
@@ -665,8 +745,20 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 ) (_ *operatorservice.AddOrUpdateRemoteClusterResponse, retError error) {
 	defer log.CapturePanic(h.logger, &retError)
 
+	frontendAddress := request.GetFrontendAddress()
+	h.logger.Info("Starting AddOrUpdateRemoteCluster request",
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewBoolTag("enable_connection", request.GetEnableRemoteClusterConnection()))
+
+	// Handle passthrough address
+	if u, err := url.Parse(frontendAddress); err == nil && u.Scheme == "passthrough" {
+		// Extract the actual address from the passthrough URI and maintain the passthrough scheme
+		target := strings.TrimPrefix(u.Path, "/")
+		frontendAddress = "passthrough:///" + target
+	}
+
 	adminClient := h.clientFactory.NewRemoteAdminClientWithTimeout(
-		request.GetFrontendAddress(),
+		frontendAddress,
 		admin.DefaultTimeout,
 		admin.DefaultLargeTimeout,
 	)
@@ -674,6 +766,9 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 	// Fetch cluster metadata from remote cluster
 	resp, err := adminClient.DescribeCluster(ctx, &adminservice.DescribeClusterRequest{})
 	if err != nil {
+		h.logger.Error("Failed to fetch cluster metadata from remote cluster",
+			tag.NewStringTag("frontend_address", request.GetFrontendAddress()),
+			tag.Error(err))
 		return nil, serviceerror.NewUnavailable(fmt.Sprintf(
 			errUnableConnectRemoteClusterMessage,
 			request.GetFrontendAddress(),
@@ -683,6 +778,9 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 
 	err = h.validateRemoteClusterMetadata(resp)
 	if err != nil {
+		h.logger.Error("Remote cluster metadata validation failed",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.Error(err))
 		return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errInvalidRemoteClusterInfo, err))
 	}
 
@@ -697,6 +795,9 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 	case *serviceerror.NotFound:
 		updateRequestVersion = 0
 	default:
+		h.logger.Error("Failed to get cluster metadata",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.Error(err))
 		return nil, serviceerror.NewInternal(fmt.Sprintf(errUnableToStoreClusterInfo, err))
 	}
 
@@ -716,12 +817,58 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 		Version: updateRequestVersion,
 	})
 	if err != nil {
+		h.logger.Error("Failed to save cluster metadata",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.Error(err))
 		return nil, serviceerror.NewInternal(fmt.Sprintf(errUnableToStoreClusterInfo, err))
 	}
 	if !applied {
+		h.logger.Error("Failed to apply cluster metadata update",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewInt64("version", updateRequestVersion))
 		return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errUnableToStoreClusterInfo, err))
 	}
+
+	h.logger.Info("Successfully added/updated remote cluster",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("cluster_id", resp.GetClusterId()),
+		tag.NewBoolTag("is_new_cluster", updateRequestVersion == 0))
+
 	return &operatorservice.AddOrUpdateRemoteClusterResponse{}, nil
+}
+
+func (h *OperatorHandlerImpl) validateRemoteClusterMetadata(metadata *adminservice.DescribeClusterResponse) error {
+	// Verify remote cluster config
+	currentClusterInfo := h.clusterMetadata
+	if metadata.GetClusterName() == currentClusterInfo.GetCurrentClusterName() {
+		h.logger.Error("Cluster name conflict detected",
+			tag.NewStringTag("cluster_name", metadata.GetClusterName()))
+		return serviceerror.NewInvalidArgument("Cannot update current cluster metadata from rpc calls")
+	}
+
+	if metadata.GetFailoverVersionIncrement() != currentClusterInfo.GetFailoverVersionIncrement() {
+		h.logger.Error("Failover version increment mismatch",
+			tag.NewInt64("remote_increment", metadata.GetFailoverVersionIncrement()),
+			tag.NewInt64("local_increment", currentClusterInfo.GetFailoverVersionIncrement()))
+		return serviceerror.NewInvalidArgument("Cannot add remote cluster due to failover version increment mismatch")
+	}
+
+	if metadata.GetHistoryShardCount() != h.config.NumHistoryShards {
+		remoteShardCount := metadata.GetHistoryShardCount()
+		large := remoteShardCount
+		small := h.config.NumHistoryShards
+		if large < small {
+			small, large = large, small
+		}
+		if large%small != 0 {
+			h.logger.Error("History shard count incompatibility",
+				tag.NewInt32("remote_shard_count", remoteShardCount),
+				tag.NewInt32("local_shard_count", h.config.NumHistoryShards))
+			return serviceerror.NewInvalidArgument("Remote cluster shard number and local cluster shard number are not multiples.")
+		}
+	}
+
+	return nil
 }
 
 func (h *OperatorHandlerImpl) RemoveRemoteCluster(
@@ -786,42 +933,6 @@ func (h *OperatorHandlerImpl) ListClusters(
 		Clusters:      clusterMetadataList,
 		NextPageToken: resp.NextPageToken,
 	}, nil
-}
-
-func (h *OperatorHandlerImpl) validateRemoteClusterMetadata(metadata *adminservice.DescribeClusterResponse) error {
-	// Verify remote cluster config
-	currentClusterInfo := h.clusterMetadata
-	if metadata.GetClusterName() == currentClusterInfo.GetCurrentClusterName() {
-		// cluster name conflict
-		return serviceerror.NewInvalidArgument("Cannot update current cluster metadata from rpc calls")
-	}
-	if metadata.GetFailoverVersionIncrement() != currentClusterInfo.GetFailoverVersionIncrement() {
-		// failover version increment is mismatch with current cluster config
-		return serviceerror.NewInvalidArgument("Cannot add remote cluster due to failover version increment mismatch")
-	}
-	if metadata.GetHistoryShardCount() != h.config.NumHistoryShards {
-		remoteShardCount := metadata.GetHistoryShardCount()
-		large := remoteShardCount
-		small := h.config.NumHistoryShards
-		if large < small {
-			small, large = large, small
-		}
-		if large%small != 0 {
-			return serviceerror.NewInvalidArgument("Remote cluster shard number and local cluster shard number are not multiples.")
-		}
-	}
-	if !metadata.IsGlobalNamespaceEnabled {
-		// remote cluster doesn't support global namespace
-		return serviceerror.NewInvalidArgument("Cannot add remote cluster as global namespace is not supported")
-	}
-	for clusterName, cluster := range currentClusterInfo.GetAllClusterInfo() {
-		if clusterName != metadata.ClusterName && cluster.InitialFailoverVersion == metadata.GetInitialFailoverVersion() {
-			// initial failover version conflict
-			// best effort: race condition if a concurrent write to db with the same version.
-			return serviceerror.NewInvalidArgument("Cannot add remote cluster due to initial failover version conflict")
-		}
-	}
-	return nil
 }
 
 func (h *OperatorHandlerImpl) CreateNexusEndpoint(

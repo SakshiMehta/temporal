@@ -260,7 +260,9 @@ func (adh *AdminHandler) Start() {
 		common.DaemonStatusInitialized,
 		common.DaemonStatusStarted,
 	) {
+		adh.logger.Info("Starting admin handler")
 		adh.healthServer.SetServingStatus(AdminServiceName, healthpb.HealthCheckResponse_SERVING)
+		adh.logger.Info("Admin service health check status set to SERVING")
 	}
 }
 
@@ -271,7 +273,9 @@ func (adh *AdminHandler) Stop() {
 		common.DaemonStatusStarted,
 		common.DaemonStatusStopped,
 	) {
+		adh.logger.Info("Stopping admin handler")
 		adh.healthServer.SetServingStatus(AdminServiceName, healthpb.HealthCheckResponse_NOT_SERVING)
+		adh.logger.Info("Admin service health check status set to NOT_SERVING")
 	}
 }
 
@@ -281,10 +285,15 @@ func (adh *AdminHandler) DeepHealthCheck(
 ) (_ *adminservice.DeepHealthCheckResponse, retError error) {
 	defer log.CapturePanic(adh.logger, &retError)
 
+	adh.logger.Info("Starting deep health check")
 	healthStatus, err := adh.historyHealthChecker.Check(ctx)
 	if err != nil {
+		adh.logger.Error("Deep health check failed",
+			tag.Error(err))
 		return nil, err
 	}
+	adh.logger.Info("Deep health check completed",
+		tag.NewStringTag("status", healthStatus.String()))
 	return &adminservice.DeepHealthCheckResponse{State: healthStatus}, nil
 }
 

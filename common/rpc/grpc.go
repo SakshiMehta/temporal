@@ -28,6 +28,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"net/url"
+	"strings"
 	"time"
 
 	"go.temporal.io/api/serviceerror"
@@ -84,6 +86,11 @@ const (
 // https://github.com/grpc/grpc/blob/master/doc/naming.md.
 // dns resolver is used by default
 func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	if u, err := url.Parse(hostName); err == nil && u.Scheme == "passthrough" {
+		// Normalize passthrough:///host:port to passthrough:host:port
+		hostName = "passthrough:" + strings.TrimPrefix(u.Path, "/")
+	}
+
 	var grpcSecureOpt grpc.DialOption
 	if tlsConfig == nil {
 		grpcSecureOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
@@ -91,12 +98,7 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 		grpcSecureOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
 
-	// gRPC maintains connection pool inside grpc.ClientConn.
-	// This connection pool has auto reconnect feature.
-	// If connection goes down, gRPC will try to reconnect using exponential backoff strategy:
-	// https://github.com/grpc/grpc/blob/master/doc/connection-backoff.md.
-	// Default MaxDelay is 120 seconds which is too high.
-	var cp = grpc.ConnectParams{
+	cp := grpc.ConnectParams{
 		Backoff:           backoff.DefaultConfig,
 		MinConnectTimeout: minConnectTimeout,
 	}
@@ -110,9 +112,7 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 			metrics.NewClientMetricsTrailerPropagatorInterceptor(logger),
 			errorInterceptor,
 		),
-		grpc.WithChainStreamInterceptor(
-			interceptor.StreamErrorInterceptor,
-		),
+		grpc.WithChainStreamInterceptor(interceptor.StreamErrorInterceptor),
 		grpc.WithDefaultServiceConfig(DefaultServiceConfig),
 		grpc.WithDisableServiceConfig(),
 		grpc.WithConnectParams(cp),

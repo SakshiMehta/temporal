@@ -31,12 +31,15 @@ import (
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/api"
+	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/log/tag"
 	"google.golang.org/grpc"
 )
 
 type (
 	HealthInterceptor struct {
 		healthy atomic.Bool
+		logger  log.Logger
 	}
 )
 
@@ -45,8 +48,8 @@ var _ grpc.UnaryServerInterceptor = (*HealthInterceptor)(nil).Intercept
 var notHealthyErr = serviceerror.NewUnavailable("Frontend is not healthy yet")
 
 // NewHealthInterceptor returns a new HealthInterceptor. It starts with state not healthy.
-func NewHealthInterceptor() *HealthInterceptor {
-	return &HealthInterceptor{}
+func NewHealthInterceptor(logger log.Logger) *HealthInterceptor {
+	return &HealthInterceptor{logger: logger}
 }
 
 func (i *HealthInterceptor) Intercept(
@@ -59,12 +62,18 @@ func (i *HealthInterceptor) Intercept(
 	if strings.HasPrefix(info.FullMethod, api.WorkflowServicePrefix) ||
 		strings.HasPrefix(info.FullMethod, api.OperatorServicePrefix) {
 		if !i.healthy.Load() {
+			i.logger.Warn("Service is not healthy, rejecting request",
+				tag.NewStringTag("method", info.FullMethod))
 			return nil, notHealthyErr
 		}
+		i.logger.Debug("Service is healthy, processing request",
+			tag.NewStringTag("method", info.FullMethod))
 	}
 	return handler(ctx, req)
 }
 
 func (i *HealthInterceptor) SetHealthy(healthy bool) {
 	i.healthy.Store(healthy)
+	i.logger.Info("Updated service health status",
+		tag.NewBoolTag("healthy", healthy))
 }

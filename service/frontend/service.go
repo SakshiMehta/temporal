@@ -441,7 +441,7 @@ func NewService(
 
 // Start starts the service
 func (s *Service) Start() {
-	s.logger.Info("frontend starting")
+	s.logger.Info("frontend starting from local image")
 
 	healthpb.RegisterHealthServer(s.server, s.healthServer)
 	workflowservice.RegisterWorkflowServiceServer(s.server, s.handler)
