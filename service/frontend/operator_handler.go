@@ -752,11 +752,18 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 
 	// Handle passthrough address
 	if u, err := url.Parse(frontendAddress); err == nil && u.Scheme == "passthrough" {
+		h.logger.Info("Processing passthrough address",
+			tag.NewStringTag("original_address", frontendAddress),
+			tag.NewStringTag("scheme", u.Scheme))
 		// Extract the actual address from the passthrough URI and maintain the passthrough scheme
 		target := strings.TrimPrefix(u.Path, "/")
 		frontendAddress = "passthrough:///" + target
+		h.logger.Info("Converted passthrough address",
+			tag.NewStringTag("new_address", frontendAddress))
 	}
 
+	h.logger.Info("Creating remote admin client",
+		tag.NewStringTag("frontend_address", frontendAddress))
 	adminClient := h.clientFactory.NewRemoteAdminClientWithTimeout(
 		frontendAddress,
 		admin.DefaultTimeout,
@@ -764,27 +771,42 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 	)
 
 	// Fetch cluster metadata from remote cluster
+	h.logger.Info("Fetching cluster metadata from remote cluster",
+		tag.NewStringTag("frontend_address", frontendAddress))
 	resp, err := adminClient.DescribeCluster(ctx, &adminservice.DescribeClusterRequest{})
 	if err != nil {
 		h.logger.Error("Failed to fetch cluster metadata from remote cluster",
-			tag.NewStringTag("frontend_address", request.GetFrontendAddress()),
+			tag.NewStringTag("frontend_address", frontendAddress),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("error_details", err.Error()),
 			tag.Error(err))
 		return nil, serviceerror.NewUnavailable(fmt.Sprintf(
 			errUnableConnectRemoteClusterMessage,
-			request.GetFrontendAddress(),
+			frontendAddress,
 			err,
 		))
 	}
+	h.logger.Info("Successfully fetched cluster metadata",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("cluster_id", resp.GetClusterId()))
 
+	h.logger.Info("Validating remote cluster metadata",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()))
 	err = h.validateRemoteClusterMetadata(resp)
 	if err != nil {
 		h.logger.Error("Remote cluster metadata validation failed",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("error_details", err.Error()),
 			tag.Error(err))
 		return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errInvalidRemoteClusterInfo, err))
 	}
+	h.logger.Info("Remote cluster metadata validation successful",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()))
 
 	var updateRequestVersion int64 = 0
+	h.logger.Info("Fetching existing cluster metadata",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()))
 	clusterData, err := h.clusterMetadataManager.GetClusterMetadata(
 		ctx,
 		&persistence.GetClusterMetadataRequest{ClusterName: resp.GetClusterName()},
@@ -792,15 +814,25 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 	switch err.(type) {
 	case nil:
 		updateRequestVersion = clusterData.Version
+		h.logger.Info("Found existing cluster metadata",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewInt64("version", updateRequestVersion))
 	case *serviceerror.NotFound:
 		updateRequestVersion = 0
+		h.logger.Info("No existing cluster metadata found, will create new entry",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()))
 	default:
 		h.logger.Error("Failed to get cluster metadata",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("error_details", err.Error()),
 			tag.Error(err))
 		return nil, serviceerror.NewInternal(fmt.Sprintf(errUnableToStoreClusterInfo, err))
 	}
 
+	h.logger.Info("Saving cluster metadata",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewInt64("version", updateRequestVersion))
 	applied, err := h.clusterMetadataManager.SaveClusterMetadata(ctx, &persistence.SaveClusterMetadataRequest{
 		ClusterMetadata: &persistencespb.ClusterMetadata{
 			ClusterName:              resp.GetClusterName(),
@@ -819,20 +851,25 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 	if err != nil {
 		h.logger.Error("Failed to save cluster metadata",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("error_details", err.Error()),
 			tag.Error(err))
 		return nil, serviceerror.NewInternal(fmt.Sprintf(errUnableToStoreClusterInfo, err))
 	}
 	if !applied {
 		h.logger.Error("Failed to apply cluster metadata update",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
-			tag.NewInt64("version", updateRequestVersion))
-		return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errUnableToStoreClusterInfo, err))
+			tag.NewInt64("version", updateRequestVersion),
+			tag.NewStringTag("reason", "version conflict or concurrent update"))
+		return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errUnableToStoreClusterInfo, "version conflict or concurrent update"))
 	}
 
 	h.logger.Info("Successfully added/updated remote cluster",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
 		tag.NewStringTag("cluster_id", resp.GetClusterId()),
-		tag.NewBoolTag("is_new_cluster", updateRequestVersion == 0))
+		tag.NewBoolTag("is_new_cluster", updateRequestVersion == 0),
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewBoolTag("connection_enabled", request.GetEnableRemoteClusterConnection()))
 
 	return &operatorservice.AddOrUpdateRemoteClusterResponse{}, nil
 }
