@@ -748,22 +748,27 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 	frontendAddress := request.GetFrontendAddress()
 	h.logger.Info("Starting AddOrUpdateRemoteCluster request",
 		tag.NewStringTag("frontend_address", frontendAddress),
-		tag.NewBoolTag("enable_connection", request.GetEnableRemoteClusterConnection()))
+		tag.NewBoolTag("enable_connection", request.GetEnableRemoteClusterConnection()),
+		tag.NewStringTag("request_type", "upsert"))
 
 	// Handle passthrough address
 	if u, err := url.Parse(frontendAddress); err == nil && u.Scheme == "passthrough" {
 		h.logger.Info("Processing passthrough address",
 			tag.NewStringTag("original_address", frontendAddress),
-			tag.NewStringTag("scheme", u.Scheme))
+			tag.NewStringTag("scheme", u.Scheme),
+			tag.NewStringTag("path", u.Path))
 		// Extract the actual address from the passthrough URI and maintain the passthrough scheme
 		target := strings.TrimPrefix(u.Path, "/")
 		frontendAddress = "passthrough:///" + target
 		h.logger.Info("Converted passthrough address",
-			tag.NewStringTag("new_address", frontendAddress))
+			tag.NewStringTag("new_address", frontendAddress),
+			tag.NewStringTag("target", target))
 	}
 
 	h.logger.Info("Creating remote admin client",
-		tag.NewStringTag("frontend_address", frontendAddress))
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewStringTag("timeout", admin.DefaultTimeout.String()),
+		tag.NewStringTag("large_timeout", admin.DefaultLargeTimeout.String()))
 	adminClient := h.clientFactory.NewRemoteAdminClientWithTimeout(
 		frontendAddress,
 		admin.DefaultTimeout,
@@ -772,13 +777,15 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 
 	// Fetch cluster metadata from remote cluster
 	h.logger.Info("Fetching cluster metadata from remote cluster",
-		tag.NewStringTag("frontend_address", frontendAddress))
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewStringTag("request_type", "DescribeCluster"))
 	resp, err := adminClient.DescribeCluster(ctx, &adminservice.DescribeClusterRequest{})
 	if err != nil {
 		h.logger.Error("Failed to fetch cluster metadata from remote cluster",
 			tag.NewStringTag("frontend_address", frontendAddress),
 			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
 			tag.NewStringTag("error_details", err.Error()),
+			tag.NewStringTag("error_code", fmt.Sprintf("%v", status.Code(err))),
 			tag.Error(err))
 		return nil, serviceerror.NewUnavailable(fmt.Sprintf(
 			errUnableConnectRemoteClusterMessage,
@@ -788,25 +795,34 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 	}
 	h.logger.Info("Successfully fetched cluster metadata",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
-		tag.NewStringTag("cluster_id", resp.GetClusterId()))
+		tag.NewStringTag("cluster_id", resp.GetClusterId()),
+		tag.NewInt32("history_shard_count", resp.GetHistoryShardCount()),
+		tag.NewInt64("failover_version_increment", resp.GetFailoverVersionIncrement()),
+		tag.NewInt64("initial_failover_version", resp.GetInitialFailoverVersion()),
+		tag.NewBoolTag("is_global_namespace_enabled", resp.GetIsGlobalNamespaceEnabled()),
+		tag.NewStringTag("http_address", resp.GetHttpAddress()))
 
-	h.logger.Info("Validating remote cluster metadata",
-		tag.NewStringTag("cluster_name", resp.GetClusterName()))
+	h.logger.Info("Starting remote cluster metadata validation",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("validation_type", "metadata"))
 	err = h.validateRemoteClusterMetadata(resp)
 	if err != nil {
 		h.logger.Error("Remote cluster metadata validation failed",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
 			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
 			tag.NewStringTag("error_details", err.Error()),
+			tag.NewStringTag("validation_type", "metadata"),
 			tag.Error(err))
 		return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errInvalidRemoteClusterInfo, err))
 	}
 	h.logger.Info("Remote cluster metadata validation successful",
-		tag.NewStringTag("cluster_name", resp.GetClusterName()))
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("validation_type", "metadata"))
 
 	var updateRequestVersion int64 = 0
 	h.logger.Info("Fetching existing cluster metadata",
-		tag.NewStringTag("cluster_name", resp.GetClusterName()))
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("operation", "GetClusterMetadata"))
 	clusterData, err := h.clusterMetadataManager.GetClusterMetadata(
 		ctx,
 		&persistence.GetClusterMetadataRequest{ClusterName: resp.GetClusterName()},
@@ -816,23 +832,28 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 		updateRequestVersion = clusterData.Version
 		h.logger.Info("Found existing cluster metadata",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
-			tag.NewInt64("version", updateRequestVersion))
+			tag.NewInt64("version", updateRequestVersion),
+			tag.NewStringTag("operation", "update"))
 	case *serviceerror.NotFound:
 		updateRequestVersion = 0
 		h.logger.Info("No existing cluster metadata found, will create new entry",
-			tag.NewStringTag("cluster_name", resp.GetClusterName()))
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewStringTag("operation", "create"))
 	default:
 		h.logger.Error("Failed to get cluster metadata",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
 			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
 			tag.NewStringTag("error_details", err.Error()),
+			tag.NewStringTag("operation", "GetClusterMetadata"),
 			tag.Error(err))
 		return nil, serviceerror.NewInternal(fmt.Sprintf(errUnableToStoreClusterInfo, err))
 	}
 
-	h.logger.Info("Saving cluster metadata",
+	h.logger.Info("Preparing to save cluster metadata",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
-		tag.NewInt64("version", updateRequestVersion))
+		tag.NewInt64("version", updateRequestVersion),
+		tag.NewStringTag("operation", "SaveClusterMetadata"),
+		tag.NewBoolTag("is_new_cluster", updateRequestVersion == 0))
 	applied, err := h.clusterMetadataManager.SaveClusterMetadata(ctx, &persistence.SaveClusterMetadataRequest{
 		ClusterMetadata: &persistencespb.ClusterMetadata{
 			ClusterName:              resp.GetClusterName(),
@@ -853,6 +874,8 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
 			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
 			tag.NewStringTag("error_details", err.Error()),
+			tag.NewStringTag("operation", "SaveClusterMetadata"),
+			tag.NewInt64("version", updateRequestVersion),
 			tag.Error(err))
 		return nil, serviceerror.NewInternal(fmt.Sprintf(errUnableToStoreClusterInfo, err))
 	}
@@ -860,16 +883,22 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 		h.logger.Error("Failed to apply cluster metadata update",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
 			tag.NewInt64("version", updateRequestVersion),
+			tag.NewStringTag("operation", "SaveClusterMetadata"),
 			tag.NewStringTag("reason", "version conflict or concurrent update"))
 		return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errUnableToStoreClusterInfo, "version conflict or concurrent update"))
 	}
 
-	h.logger.Info("Successfully added/updated remote cluster",
+	h.logger.Info("Successfully completed AddOrUpdateRemoteCluster operation",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
 		tag.NewStringTag("cluster_id", resp.GetClusterId()),
 		tag.NewBoolTag("is_new_cluster", updateRequestVersion == 0),
 		tag.NewStringTag("frontend_address", frontendAddress),
-		tag.NewBoolTag("connection_enabled", request.GetEnableRemoteClusterConnection()))
+		tag.NewBoolTag("connection_enabled", request.GetEnableRemoteClusterConnection()),
+		tag.NewInt32("history_shard_count", resp.GetHistoryShardCount()),
+		tag.NewInt64("failover_version_increment", resp.GetFailoverVersionIncrement()),
+		tag.NewInt64("initial_failover_version", resp.GetInitialFailoverVersion()),
+		tag.NewBoolTag("is_global_namespace_enabled", resp.GetIsGlobalNamespaceEnabled()),
+		tag.NewStringTag("operation", "complete"))
 
 	return &operatorservice.AddOrUpdateRemoteClusterResponse{}, nil
 }
@@ -879,14 +908,17 @@ func (h *OperatorHandlerImpl) validateRemoteClusterMetadata(metadata *adminservi
 	currentClusterInfo := h.clusterMetadata
 	if metadata.GetClusterName() == currentClusterInfo.GetCurrentClusterName() {
 		h.logger.Error("Cluster name conflict detected",
-			tag.NewStringTag("cluster_name", metadata.GetClusterName()))
+			tag.NewStringTag("cluster_name", metadata.GetClusterName()),
+			tag.NewStringTag("current_cluster_name", currentClusterInfo.GetCurrentClusterName()),
+			tag.NewStringTag("validation_type", "cluster_name"))
 		return serviceerror.NewInvalidArgument("Cannot update current cluster metadata from rpc calls")
 	}
 
 	if metadata.GetFailoverVersionIncrement() != currentClusterInfo.GetFailoverVersionIncrement() {
 		h.logger.Error("Failover version increment mismatch",
 			tag.NewInt64("remote_increment", metadata.GetFailoverVersionIncrement()),
-			tag.NewInt64("local_increment", currentClusterInfo.GetFailoverVersionIncrement()))
+			tag.NewInt64("local_increment", currentClusterInfo.GetFailoverVersionIncrement()),
+			tag.NewStringTag("validation_type", "failover_version_increment"))
 		return serviceerror.NewInvalidArgument("Cannot add remote cluster due to failover version increment mismatch")
 	}
 
@@ -900,10 +932,15 @@ func (h *OperatorHandlerImpl) validateRemoteClusterMetadata(metadata *adminservi
 		if large%small != 0 {
 			h.logger.Error("History shard count incompatibility",
 				tag.NewInt32("remote_shard_count", remoteShardCount),
-				tag.NewInt32("local_shard_count", h.config.NumHistoryShards))
+				tag.NewInt32("local_shard_count", h.config.NumHistoryShards),
+				tag.NewStringTag("validation_type", "shard_count"))
 			return serviceerror.NewInvalidArgument("Remote cluster shard number and local cluster shard number are not multiples.")
 		}
 	}
+
+	h.logger.Info("Remote cluster metadata validation successful",
+		tag.NewStringTag("cluster_name", metadata.GetClusterName()),
+		tag.NewStringTag("validation_type", "all"))
 
 	return nil
 }
