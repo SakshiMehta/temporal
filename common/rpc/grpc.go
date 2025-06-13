@@ -28,6 +28,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -86,25 +87,57 @@ const (
 // https://github.com/grpc/grpc/blob/master/doc/naming.md.
 // dns resolver is used by default
 func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	var grpcSecureOpt grpc.DialOption
+	var dialOptions []grpc.DialOption
+
+	// Handle passthrough addresses specially
 	if u, err := url.Parse(hostName); err == nil && u.Scheme == "passthrough" {
-		// Normalize passthrough:///host:port to passthrough:host:port
+		// For passthrough addresses, normalize the format to passthrough:host:port
+		// This ensures gRPC uses the passthrough resolver
 		hostName = "passthrough:" + strings.TrimPrefix(u.Path, "/")
+
+		// Add custom dialer that uses the hostname as-is for passthrough addresses
+		customDialer := func(ctx context.Context, addr string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}
+			// Use the address without the passthrough: prefix for the actual TCP connection
+			addrWithoutPrefix := strings.TrimPrefix(addr, "passthrough:")
+			return dialer.DialContext(ctx, "tcp", addrWithoutPrefix)
+		}
+		dialOptions = append(dialOptions, grpc.WithContextDialer(customDialer))
 	}
 
-	var grpcSecureOpt grpc.DialOption
+	// Set up TLS
 	if tlsConfig == nil {
 		grpcSecureOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
 	} else {
-		grpcSecureOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
+		// Create a copy of the TLS config to modify
+		tlsConfigCopy := tlsConfig.Clone()
+		// Extract the hostname for TLS verification
+		host, _, err := net.SplitHostPort(hostName)
+		if err != nil {
+			host = hostName // If no port, use the full hostname
+		}
+		// Set the ServerName for TLS verification
+		tlsConfigCopy.ServerName = host
+		grpcSecureOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfigCopy))
 	}
 
-	cp := grpc.ConnectParams{
+	// gRPC maintains connection pool inside grpc.ClientConn.
+	// This connection pool has auto reconnect feature.
+	// If connection goes down, gRPC will try to reconnect using exponential backoff strategy:
+	// https://github.com/grpc/grpc/blob/master/doc/connection-backoff.md.
+	// Default MaxDelay is 120 seconds which is too high.
+	var cp = grpc.ConnectParams{
 		Backoff:           backoff.DefaultConfig,
 		MinConnectTimeout: minConnectTimeout,
 	}
 	cp.Backoff.MaxDelay = MaxBackoffDelay
 
-	dialOptions := []grpc.DialOption{
+	// Add common dial options
+	dialOptions = append(dialOptions,
 		grpcSecureOpt,
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxInternodeRecvPayloadSize)),
 		grpc.WithChainUnaryInterceptor(
@@ -112,11 +145,13 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 			metrics.NewClientMetricsTrailerPropagatorInterceptor(logger),
 			errorInterceptor,
 		),
-		grpc.WithChainStreamInterceptor(interceptor.StreamErrorInterceptor),
+		grpc.WithChainStreamInterceptor(
+			interceptor.StreamErrorInterceptor,
+		),
 		grpc.WithDefaultServiceConfig(DefaultServiceConfig),
 		grpc.WithDisableServiceConfig(),
 		grpc.WithConnectParams(cp),
-	}
+	)
 	dialOptions = append(dialOptions, opts...)
 
 	return grpc.NewClient(hostName, dialOptions...)
