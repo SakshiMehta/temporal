@@ -207,6 +207,8 @@ func getListenIP(cfg *config.RPC, logger log.Logger) net.IP {
 
 // CreateRemoteFrontendGRPCConnection creates connection for gRPC calls
 func (d *RPCFactory) CreateRemoteFrontendGRPCConnection(rpcAddress string) *grpc.ClientConn {
+	d.logger.Info("Starting CreateRemoteFrontendGRPCConnection", tag.Address(rpcAddress))
+	start := time.Now()
 	var tlsClientConfig *tls.Config
 	if d.tlsFactory != nil {
 		target := rpcAddress
@@ -230,7 +232,15 @@ func (d *RPCFactory) CreateRemoteFrontendGRPCConnection(rpcAddress string) *grpc
 		}
 	}
 
-	return d.dial(rpcAddress, tlsClientConfig)
+	if tlsClientConfig != nil {
+		d.logger.Info("TLS config loaded", tag.NewStringTag("serverName", tlsClientConfig.ServerName))
+	} else {
+		d.logger.Info("No TLS config, using insecure connection")
+	}
+
+	connection := d.dial(rpcAddress, tlsClientConfig)
+	d.logger.Info("Finished CreateRemoteFrontendGRPCConnection", tag.Address(rpcAddress), tag.NewStringTag("duration", time.Since(start).String()))
+	return connection
 }
 
 // CreateLocalFrontendGRPCConnection creates connection for internal frontend calls
@@ -258,12 +268,19 @@ func (d *RPCFactory) CreateInternodeGRPCConnection(hostName string) *grpc.Client
 }
 
 func (d *RPCFactory) dial(hostName string, tlsClientConfig *tls.Config) *grpc.ClientConn {
+	d.logger.Info("Starting dial", tag.Address(hostName))
+	start := time.Now()
+	if tlsClientConfig != nil {
+		d.logger.Info("TLS config loaded", tag.NewStringTag("serverName", tlsClientConfig.ServerName))
+	} else {
+		d.logger.Info("No TLS config, using insecure connection")
+	}
 	connection, err := Dial(hostName, tlsClientConfig, d.logger, d.dialOptions...)
 	if err != nil {
 		d.logger.Fatal("Failed to create gRPC connection", tag.Error(err))
 		return nil
 	}
-
+	d.logger.Info("Finished dial", tag.Address(hostName), tag.NewStringTag("duration", time.Since(start).String()))
 	return connection
 }
 

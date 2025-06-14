@@ -456,15 +456,25 @@ func (rpo *monitor) EvictSelfAt(asOf time.Time) (time.Duration, error) {
 }
 
 func (rpo *monitor) GetResolver(service primitives.ServiceName) (membership.ServiceResolver, error) {
+	rpo.logger.Info("GetResolver called", tag.NewStringTag("service", string(service)))
 	ring, found := rpo.rings[service]
 	if !found {
+		rpo.logger.Error("GetResolver: unknown service", tag.NewStringTag("service", string(service)))
 		return nil, membership.ErrUnknownService
 	}
+	rpo.logger.Info("GetResolver: found service", tag.NewStringTag("service", string(service)))
 	return ring, nil
 }
 
 func (rpo *monitor) GetReachableMembers() ([]string, error) {
-	return rpo.rp.GetReachableMembers()
+	rpo.logger.Info("GetReachableMembers called")
+	members, err := rpo.rp.GetReachableMembers()
+	if err != nil {
+		rpo.logger.Error("GetReachableMembers error", tag.Error(err))
+		return nil, err
+	}
+	rpo.logger.Info("GetReachableMembers completed", tag.NewInt("num_members", len(members)))
+	return members, nil
 }
 
 func (rpo *monitor) SetDraining(draining bool) error {

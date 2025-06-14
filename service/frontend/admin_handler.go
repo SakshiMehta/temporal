@@ -31,6 +31,7 @@ import (
 	"io"
 	"maps"
 	"net"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -88,6 +89,7 @@ import (
 	"go.temporal.io/server/service/worker/dlq"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -1050,19 +1052,27 @@ func (adh *AdminHandler) DescribeCluster(
 	ctx context.Context,
 	request *adminservice.DescribeClusterRequest,
 ) (_ *adminservice.DescribeClusterResponse, retError error) {
+	adh.logger.Info("DescribeCluster called",
+		tag.NewStringTag("request_type", "admin_DescribeCluster"),
+		tag.NewStringTag("requested_cluster_name", request.GetClusterName()),
+	)
 	defer log.CapturePanic(adh.logger, &retError)
 
 	membershipInfo := &clusterspb.MembershipInfo{}
 	if monitor := adh.membershipMonitor; monitor != nil {
+		adh.logger.Info("Fetching membership info for DescribeCluster")
+		adh.logger.Info("Calling adh.hostInfoProvider.HostInfo()")
+		hostInfo := adh.hostInfoProvider.HostInfo()
+		adh.logger.Info("adh.hostInfoProvider.HostInfo() returned", tag.NewStringTag("identity", hostInfo.Identity()))
 		membershipInfo.CurrentHost = &clusterspb.HostInfo{
-			Identity: adh.hostInfoProvider.HostInfo().Identity(),
+			Identity: hostInfo.Identity(),
 		}
 
 		members, err := monitor.GetReachableMembers()
 		if err != nil {
+			adh.logger.Error("Failed to get reachable members in DescribeCluster", tag.Error(err))
 			return nil, err
 		}
-
 		membershipInfo.ReachableMembers = members
 
 		var rings []*clusterspb.RingInfo
@@ -1078,6 +1088,7 @@ func (adh *AdminHandler) DescribeCluster(
 				if role == primitives.InternalFrontendService {
 					continue // this one is optional
 				}
+				adh.logger.Error("Failed to get resolver in DescribeCluster", tag.NewStringTag("role", string(role)), tag.Error(err))
 				return nil, err
 			}
 
@@ -1095,20 +1106,35 @@ func (adh *AdminHandler) DescribeCluster(
 			})
 		}
 		membershipInfo.Rings = rings
+		adh.logger.Info("Membership info fetched for DescribeCluster")
 	}
 
 	if len(request.ClusterName) == 0 {
+		adh.logger.Info("ClusterName not provided, using current cluster name", tag.NewStringTag("current_cluster_name", adh.clusterMetadata.GetCurrentClusterName()))
 		request.ClusterName = adh.clusterMetadata.GetCurrentClusterName()
 	}
+	adh.logger.Info("Fetching cluster metadata in DescribeCluster", tag.NewStringTag("cluster_name", request.GetClusterName()))
+	adh.logger.Info("Calling adh.clusterMetadataManager.GetClusterMetadata")
 	metadata, err := adh.clusterMetadataManager.GetClusterMetadata(
 		ctx,
 		&persistence.GetClusterMetadataRequest{ClusterName: request.GetClusterName()},
 	)
 	if err != nil {
+		adh.logger.Error("Failed to fetch cluster metadata in DescribeCluster", tag.NewStringTag("cluster_name", request.GetClusterName()), tag.Error(err))
 		return nil, err
 	}
+	adh.logger.Info("adh.clusterMetadataManager.GetClusterMetadata returned", tag.NewStringTag("cluster_id", metadata.GetClusterId()), tag.NewStringTag("cluster_name", metadata.GetClusterName()), tag.NewInt32("history_shard_count", metadata.GetHistoryShardCount()), tag.NewInt64("failover_version_increment", metadata.GetFailoverVersionIncrement()), tag.NewInt64("initial_failover_version", metadata.GetInitialFailoverVersion()), tag.NewBoolTag("is_global_namespace_enabled", metadata.GetIsGlobalNamespaceEnabled()), tag.NewStringTag("http_address", metadata.GetHttpAddress()))
+	adh.logger.Info("Cluster metadata fetched in DescribeCluster",
+		tag.NewStringTag("cluster_id", metadata.GetClusterId()),
+		tag.NewStringTag("cluster_name", metadata.GetClusterName()),
+		tag.NewInt32("history_shard_count", metadata.GetHistoryShardCount()),
+		tag.NewInt64("failover_version_increment", metadata.GetFailoverVersionIncrement()),
+		tag.NewInt64("initial_failover_version", metadata.GetInitialFailoverVersion()),
+		tag.NewBoolTag("is_global_namespace_enabled", metadata.GetIsGlobalNamespaceEnabled()),
+		tag.NewStringTag("http_address", metadata.GetHttpAddress()),
+	)
 
-	return &adminservice.DescribeClusterResponse{
+	resp := &adminservice.DescribeClusterResponse{
 		SupportedClients:         headers.SupportedClients,
 		ServerVersion:            headers.ServerVersion,
 		MembershipInfo:           membershipInfo,
@@ -1123,7 +1149,17 @@ func (adh *AdminHandler) DescribeCluster(
 		IsGlobalNamespaceEnabled: metadata.GetIsGlobalNamespaceEnabled(),
 		Tags:                     metadata.GetTags(),
 		HttpAddress:              metadata.GetHttpAddress(),
-	}, nil
+	}
+	adh.logger.Info("DescribeCluster completed successfully",
+		tag.NewStringTag("cluster_id", resp.GetClusterId()),
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewInt32("history_shard_count", resp.GetHistoryShardCount()),
+		tag.NewInt64("failover_version_increment", resp.GetFailoverVersionIncrement()),
+		tag.NewInt64("initial_failover_version", resp.GetInitialFailoverVersion()),
+		tag.NewBoolTag("is_global_namespace_enabled", resp.GetIsGlobalNamespaceEnabled()),
+		tag.NewStringTag("http_address", resp.GetHttpAddress()),
+	)
+	return resp, nil
 }
 
 // ListClusters return information about temporal clusters
@@ -1223,39 +1259,123 @@ func (adh *AdminHandler) AddOrUpdateRemoteCluster(
 ) (_ *adminservice.AddOrUpdateRemoteClusterResponse, retError error) {
 	defer log.CapturePanic(adh.logger, &retError)
 
+	frontendAddress := request.GetFrontendAddress()
+	requestID := uuid.New()
+	adh.logger.Info("Starting AddOrUpdateRemoteCluster request in admin handler",
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewBoolTag("enable_connection", request.GetEnableRemoteClusterConnection()),
+		tag.NewStringTag("request_type", "admin_upsert"),
+		tag.NewStringTag("request_id", requestID))
+
+	// Handle passthrough address
+	if u, err := url.Parse(frontendAddress); err == nil && u.Scheme == "passthrough" {
+		adh.logger.Info("Processing passthrough address in admin handler",
+			tag.NewStringTag("original_address", frontendAddress),
+			tag.NewStringTag("scheme", u.Scheme),
+			tag.NewStringTag("path", u.Path),
+			tag.NewStringTag("host", u.Host),
+			tag.NewStringTag("request_type", "admin_passthrough_parsing"))
+		// Extract the actual address from the passthrough URI and maintain the passthrough scheme
+		target := strings.TrimPrefix(u.Path, "/")
+		frontendAddress = "passthrough:///" + target
+		adh.logger.Info("Converted passthrough address in admin handler",
+			tag.NewStringTag("new_address", frontendAddress),
+			tag.NewStringTag("target", target),
+			tag.NewStringTag("request_type", "admin_passthrough_conversion"))
+	}
+
+	adh.logger.Info("Creating remote admin client in admin handler",
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewStringTag("timeout", admin.DefaultTimeout.String()),
+		tag.NewStringTag("large_timeout", admin.DefaultLargeTimeout.String()),
+		tag.NewStringTag("request_type", "admin_client_creation"))
 	adminClient := adh.clientFactory.NewRemoteAdminClientWithTimeout(
-		request.GetFrontendAddress(),
+		frontendAddress,
 		admin.DefaultTimeout,
 		admin.DefaultLargeTimeout,
 	)
 
 	// Fetch cluster metadata from remote cluster
+	adh.logger.Info("Fetching cluster metadata from remote cluster in admin handler",
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewStringTag("request_type", "admin_DescribeCluster"),
+		tag.NewStringTag("connection_type", "remote"))
 	resp, err := adminClient.DescribeCluster(ctx, &adminservice.DescribeClusterRequest{})
 	if err != nil {
+		adh.logger.Error("Failed to fetch cluster metadata from remote cluster in admin handler",
+			tag.NewStringTag("frontend_address", frontendAddress),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("error_details", err.Error()),
+			tag.NewStringTag("error_code", fmt.Sprintf("%v", status.Code(err))),
+			tag.NewStringTag("request_type", "admin_DescribeCluster_error"),
+			tag.Error(err))
 		return nil, err
 	}
+	adh.logger.Info("Successfully fetched cluster metadata in admin handler",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("cluster_id", resp.GetClusterId()),
+		tag.NewInt32("history_shard_count", resp.GetHistoryShardCount()),
+		tag.NewInt64("failover_version_increment", resp.GetFailoverVersionIncrement()),
+		tag.NewInt64("initial_failover_version", resp.GetInitialFailoverVersion()),
+		tag.NewBoolTag("is_global_namespace_enabled", resp.GetIsGlobalNamespaceEnabled()),
+		tag.NewStringTag("http_address", resp.GetHttpAddress()),
+		tag.NewStringTag("request_type", "admin_DescribeCluster_success"))
 
+	adh.logger.Info("Starting remote cluster metadata validation in admin handler",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("validation_type", "metadata"),
+		tag.NewStringTag("request_type", "admin_validation_start"))
 	err = adh.validateRemoteClusterMetadata(resp)
 	if err != nil {
+		adh.logger.Error("Remote cluster metadata validation failed in admin handler",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("error_details", err.Error()),
+			tag.NewStringTag("validation_type", "metadata"),
+			tag.NewStringTag("request_type", "admin_validation_error"),
+			tag.Error(err))
 		return nil, err
 	}
+	adh.logger.Info("Remote cluster metadata validation successful in admin handler",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("validation_type", "metadata"),
+		tag.NewStringTag("request_type", "admin_validation_success"))
 
 	var updateRequestVersion int64 = 0
-	clusterMetadataMrg := adh.clusterMetadataManager
-	clusterData, err := clusterMetadataMrg.GetClusterMetadata(
+	adh.logger.Info("Fetching existing cluster metadata in admin handler",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("request_type", "admin_get_metadata"))
+	clusterData, err := adh.clusterMetadataManager.GetClusterMetadata(
 		ctx,
 		&persistence.GetClusterMetadataRequest{ClusterName: resp.GetClusterName()},
 	)
 	switch err.(type) {
 	case nil:
 		updateRequestVersion = clusterData.Version
+		adh.logger.Info("Found existing cluster metadata in admin handler",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewInt64("version", updateRequestVersion),
+			tag.NewStringTag("request_type", "admin_get_metadata_success"))
 	case *serviceerror.NotFound:
 		updateRequestVersion = 0
+		adh.logger.Info("No existing cluster metadata found, will create new in admin handler",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewStringTag("request_type", "admin_get_metadata_not_found"))
 	default:
+		adh.logger.Error("Failed to get cluster metadata in admin handler",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("error_details", err.Error()),
+			tag.NewStringTag("request_type", "admin_get_metadata_error"),
+			tag.Error(err))
 		return nil, err
 	}
 
-	applied, err := clusterMetadataMrg.SaveClusterMetadata(ctx, &persistence.SaveClusterMetadataRequest{
+	adh.logger.Info("Saving cluster metadata in admin handler",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewInt64("version", updateRequestVersion),
+		tag.NewStringTag("request_type", "admin_save_metadata_start"))
+	applied, err := adh.clusterMetadataManager.SaveClusterMetadata(ctx, &persistence.SaveClusterMetadataRequest{
 		ClusterMetadata: &persistencespb.ClusterMetadata{
 			ClusterName:              resp.GetClusterName(),
 			HistoryShardCount:        resp.GetHistoryShardCount(),
@@ -1271,12 +1391,40 @@ func (adh *AdminHandler) AddOrUpdateRemoteCluster(
 		Version: updateRequestVersion,
 	})
 	if err != nil {
+		adh.logger.Error("Failed to save cluster metadata in admin handler",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("error_details", err.Error()),
+			tag.NewStringTag("operation", "SaveClusterMetadata"),
+			tag.NewInt64("version", updateRequestVersion),
+			tag.NewStringTag("request_type", "admin_save_metadata_error"),
+			tag.Error(err))
 		return nil, err
 	}
 	if !applied {
+		adh.logger.Error("Failed to apply cluster metadata update in admin handler",
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewInt64("version", updateRequestVersion),
+			tag.NewStringTag("operation", "SaveClusterMetadata"),
+			tag.NewStringTag("reason", "version conflict or concurrent update"),
+			tag.NewStringTag("request_type", "admin_save_metadata_not_applied"))
 		return nil, serviceerror.NewInvalidArgument(
 			"Cannot update remote cluster due to update immutable fields")
 	}
+
+	adh.logger.Info("Successfully completed AddOrUpdateRemoteCluster operation in admin handler",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("cluster_id", resp.GetClusterId()),
+		tag.NewBoolTag("is_new_cluster", updateRequestVersion == 0),
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewBoolTag("connection_enabled", request.GetEnableRemoteClusterConnection()),
+		tag.NewInt32("history_shard_count", resp.GetHistoryShardCount()),
+		tag.NewInt64("failover_version_increment", resp.GetFailoverVersionIncrement()),
+		tag.NewInt64("initial_failover_version", resp.GetInitialFailoverVersion()),
+		tag.NewBoolTag("is_global_namespace_enabled", resp.GetIsGlobalNamespaceEnabled()),
+		tag.NewStringTag("operation", "complete"),
+		tag.NewStringTag("request_type", "admin_operation_complete"))
+
 	return &adminservice.AddOrUpdateRemoteClusterResponse{}, nil
 }
 
