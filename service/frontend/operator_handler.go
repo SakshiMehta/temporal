@@ -66,6 +66,7 @@ import (
 	"go.temporal.io/server/service/worker/deletenamespace"
 	"go.temporal.io/server/service/worker/deletenamespace/deleteexecutions"
 	delnserrors "go.temporal.io/server/service/worker/deletenamespace/errors"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -775,12 +776,19 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 		admin.DefaultLargeTimeout,
 	)
 
-	// Fetch cluster metadata from remote cluster
-	h.logger.Info("Fetching cluster metadata from remote cluster",
-		tag.NewStringTag("frontend_address", frontendAddress),
-		tag.NewStringTag("request_type", "DescribeCluster"))
+	// Before the call
+	h.logger.Info("[DescribeCluster] Making RPC call to remote cluster",
+		tag.NewStringTag("frontend_address", frontendAddress))
+
 	resp, err := adminClient.DescribeCluster(ctx, &adminservice.DescribeClusterRequest{})
-	if err != nil {
+
+	// After the call, before error handling
+	if err == nil {
+		h.logger.Info("[DescribeCluster] Successfully received cluster metadata",
+			tag.NewStringTag("frontend_address", frontendAddress),
+			tag.NewStringTag("cluster_name", resp.GetClusterName()),
+			tag.NewStringTag("cluster_id", resp.GetClusterId()))
+	} else {
 		h.logger.Error("Failed to fetch cluster metadata from remote cluster",
 			tag.NewStringTag("frontend_address", frontendAddress),
 			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
@@ -793,14 +801,6 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 			err,
 		))
 	}
-	h.logger.Info("Successfully fetched cluster metadata",
-		tag.NewStringTag("cluster_name", resp.GetClusterName()),
-		tag.NewStringTag("cluster_id", resp.GetClusterId()),
-		tag.NewInt32("history_shard_count", resp.GetHistoryShardCount()),
-		tag.NewInt64("failover_version_increment", resp.GetFailoverVersionIncrement()),
-		tag.NewInt64("initial_failover_version", resp.GetInitialFailoverVersion()),
-		tag.NewBoolTag("is_global_namespace_enabled", resp.GetIsGlobalNamespaceEnabled()),
-		tag.NewStringTag("http_address", resp.GetHttpAddress()))
 
 	h.logger.Info("Starting remote cluster metadata validation",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
@@ -1062,4 +1062,35 @@ func (h *OperatorHandlerImpl) ListNexusEndpoints(
 		return nil, status.Error(codes.NotFound, "Nexus APIs are disabled")
 	}
 	return h.nexusEndpointClient.List(ctx, request)
+}
+
+func errorInterceptor(
+	logger log.Logger,
+) grpc.UnaryClientInterceptor {
+	return func(
+		ctx context.Context,
+		method string,
+		req, reply interface{},
+		cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		opts ...grpc.CallOption,
+	) error {
+		// Before the call
+		logger.Info("[gRPC] Starting RPC call", tag.NewStringTag("method", method))
+
+		err := invoker(ctx, method, req, reply, cc, opts...)
+
+		// After the call
+		if err != nil {
+			logger.Error("[gRPC] RPC call failed",
+				tag.Error(err),
+				tag.NewStringTag("method", method))
+		} else {
+			logger.Info("[gRPC] RPC call succeeded",
+				tag.NewStringTag("method", method))
+		}
+
+		err = serviceerror.FromStatus(status.Convert(err))
+		return err
+	}
 }

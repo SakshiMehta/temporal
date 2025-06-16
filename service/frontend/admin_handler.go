@@ -1054,8 +1054,7 @@ func (adh *AdminHandler) DescribeCluster(
 ) (_ *adminservice.DescribeClusterResponse, retError error) {
 	adh.logger.Info("DescribeCluster called",
 		tag.NewStringTag("request_type", "admin_DescribeCluster"),
-		tag.NewStringTag("requested_cluster_name", request.GetClusterName()),
-	)
+		tag.NewStringTag("requested_cluster_name", request.GetClusterName()))
 	defer log.CapturePanic(adh.logger, &retError)
 
 	membershipInfo := &clusterspb.MembershipInfo{}
