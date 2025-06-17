@@ -1052,29 +1052,48 @@ func (adh *AdminHandler) DescribeCluster(
 	ctx context.Context,
 	request *adminservice.DescribeClusterRequest,
 ) (_ *adminservice.DescribeClusterResponse, retError error) {
-	adh.logger.Info("DescribeCluster called",
+	start := time.Now()
+	requestID := uuid.New()
+
+	adh.logger.Info("Starting DescribeCluster request in admin handler",
+		tag.NewStringTag("requested_cluster_name", request.GetClusterName()),
 		tag.NewStringTag("request_type", "admin_DescribeCluster"),
-		tag.NewStringTag("requested_cluster_name", request.GetClusterName()))
+		tag.NewStringTag("request_id", requestID),
+		tag.NewStringTag("request_timestamp", start.Format(time.RFC3339)))
+
 	defer log.CapturePanic(adh.logger, &retError)
 
 	membershipInfo := &clusterspb.MembershipInfo{}
 	if monitor := adh.membershipMonitor; monitor != nil {
-		adh.logger.Info("Fetching membership info for DescribeCluster")
+		adh.logger.Info("Fetching membership info for DescribeCluster",
+			tag.NewStringTag("request_type", "admin_membership_start"))
+
+		membershipStart := time.Now()
 		adh.logger.Info("Calling adh.hostInfoProvider.HostInfo()")
 		hostInfo := adh.hostInfoProvider.HostInfo()
-		adh.logger.Info("adh.hostInfoProvider.HostInfo() returned", tag.NewStringTag("identity", hostInfo.Identity()))
+		adh.logger.Info("adh.hostInfoProvider.HostInfo() returned",
+			tag.NewStringTag("identity", hostInfo.Identity()),
+			tag.NewStringTag("request_type", "admin_host_info"))
+
 		membershipInfo.CurrentHost = &clusterspb.HostInfo{
 			Identity: hostInfo.Identity(),
 		}
 
+		adh.logger.Info("Getting reachable members for DescribeCluster")
 		members, err := monitor.GetReachableMembers()
 		if err != nil {
-			adh.logger.Error("Failed to get reachable members in DescribeCluster", tag.Error(err))
+			adh.logger.Error("Failed to get reachable members in DescribeCluster",
+				tag.Error(err),
+				tag.NewStringTag("request_type", "admin_membership_error"))
 			return nil, err
 		}
 		membershipInfo.ReachableMembers = members
+		adh.logger.Info("Successfully got reachable members for DescribeCluster",
+			tag.NewStringTag("member_count", fmt.Sprintf("%d", len(members))),
+			tag.NewStringTag("request_type", "admin_membership_success"))
 
 		var rings []*clusterspb.RingInfo
+		adh.logger.Info("Building ring information for DescribeCluster")
 		for _, role := range []primitives.ServiceName{
 			primitives.FrontendService,
 			primitives.InternalFrontendService,
@@ -1082,12 +1101,22 @@ func (adh *AdminHandler) DescribeCluster(
 			primitives.MatchingService,
 			primitives.WorkerService,
 		} {
+			adh.logger.Info("Getting resolver for role in DescribeCluster",
+				tag.NewStringTag("role", string(role)),
+				tag.NewStringTag("request_type", "admin_resolver_start"))
+
 			resolver, err := monitor.GetResolver(role)
 			if err != nil {
 				if role == primitives.InternalFrontendService {
+					adh.logger.Info("Skipping optional InternalFrontendService resolver",
+						tag.NewStringTag("role", string(role)),
+						tag.NewStringTag("request_type", "admin_resolver_skip"))
 					continue // this one is optional
 				}
-				adh.logger.Error("Failed to get resolver in DescribeCluster", tag.NewStringTag("role", string(role)), tag.Error(err))
+				adh.logger.Error("Failed to get resolver in DescribeCluster",
+					tag.NewStringTag("role", string(role)),
+					tag.Error(err),
+					tag.NewStringTag("request_type", "admin_resolver_error"))
 				return nil, err
 			}
 
@@ -1103,26 +1132,59 @@ func (adh *AdminHandler) DescribeCluster(
 				MemberCount: int32(resolver.MemberCount()),
 				Members:     servers,
 			})
+
+			adh.logger.Info("Successfully built ring info for role in DescribeCluster",
+				tag.NewStringTag("role", string(role)),
+				tag.NewStringTag("member_count", fmt.Sprintf("%d", resolver.MemberCount())),
+				tag.NewStringTag("request_type", "admin_resolver_success"))
 		}
 		membershipInfo.Rings = rings
-		adh.logger.Info("Membership info fetched for DescribeCluster")
+		adh.logger.Info("Membership info fetched for DescribeCluster",
+			tag.NewStringTag("membership_duration", time.Since(membershipStart).String()),
+			tag.NewStringTag("ring_count", fmt.Sprintf("%d", len(rings))),
+			tag.NewStringTag("request_type", "admin_membership_complete"))
+	} else {
+		adh.logger.Info("No membership monitor available for DescribeCluster",
+			tag.NewStringTag("request_type", "admin_membership_none"))
 	}
 
 	if len(request.ClusterName) == 0 {
-		adh.logger.Info("ClusterName not provided, using current cluster name", tag.NewStringTag("current_cluster_name", adh.clusterMetadata.GetCurrentClusterName()))
+		adh.logger.Info("ClusterName not provided, using current cluster name",
+			tag.NewStringTag("current_cluster_name", adh.clusterMetadata.GetCurrentClusterName()),
+			tag.NewStringTag("request_type", "admin_cluster_name_default"))
 		request.ClusterName = adh.clusterMetadata.GetCurrentClusterName()
 	}
-	adh.logger.Info("Fetching cluster metadata in DescribeCluster", tag.NewStringTag("cluster_name", request.GetClusterName()))
+
+	adh.logger.Info("Fetching cluster metadata in DescribeCluster",
+		tag.NewStringTag("cluster_name", request.GetClusterName()),
+		tag.NewStringTag("request_type", "admin_get_metadata_start"))
+
+	metadataStart := time.Now()
 	adh.logger.Info("Calling adh.clusterMetadataManager.GetClusterMetadata")
 	metadata, err := adh.clusterMetadataManager.GetClusterMetadata(
 		ctx,
 		&persistence.GetClusterMetadataRequest{ClusterName: request.GetClusterName()},
 	)
 	if err != nil {
-		adh.logger.Error("Failed to fetch cluster metadata in DescribeCluster", tag.NewStringTag("cluster_name", request.GetClusterName()), tag.Error(err))
+		adh.logger.Error("Failed to fetch cluster metadata in DescribeCluster",
+			tag.NewStringTag("cluster_name", request.GetClusterName()),
+			tag.Error(err),
+			tag.NewStringTag("metadata_duration", time.Since(metadataStart).String()),
+			tag.NewStringTag("total_duration", time.Since(start).String()),
+			tag.NewStringTag("request_type", "admin_get_metadata_error"))
 		return nil, err
 	}
-	adh.logger.Info("adh.clusterMetadataManager.GetClusterMetadata returned", tag.NewStringTag("cluster_id", metadata.GetClusterId()), tag.NewStringTag("cluster_name", metadata.GetClusterName()), tag.NewInt32("history_shard_count", metadata.GetHistoryShardCount()), tag.NewInt64("failover_version_increment", metadata.GetFailoverVersionIncrement()), tag.NewInt64("initial_failover_version", metadata.GetInitialFailoverVersion()), tag.NewBoolTag("is_global_namespace_enabled", metadata.GetIsGlobalNamespaceEnabled()), tag.NewStringTag("http_address", metadata.GetHttpAddress()))
+
+	adh.logger.Info("adh.clusterMetadataManager.GetClusterMetadata returned",
+		tag.NewStringTag("cluster_id", metadata.GetClusterId()),
+		tag.NewStringTag("cluster_name", metadata.GetClusterName()),
+		tag.NewInt32("history_shard_count", metadata.GetHistoryShardCount()),
+		tag.NewInt64("failover_version_increment", metadata.GetFailoverVersionIncrement()),
+		tag.NewInt64("initial_failover_version", metadata.GetInitialFailoverVersion()),
+		tag.NewBoolTag("is_global_namespace_enabled", metadata.GetIsGlobalNamespaceEnabled()),
+		tag.NewStringTag("http_address", metadata.GetHttpAddress()),
+		tag.NewStringTag("request_type", "admin_metadata_details"))
+
 	adh.logger.Info("Cluster metadata fetched in DescribeCluster",
 		tag.NewStringTag("cluster_id", metadata.GetClusterId()),
 		tag.NewStringTag("cluster_name", metadata.GetClusterName()),
@@ -1131,8 +1193,10 @@ func (adh *AdminHandler) DescribeCluster(
 		tag.NewInt64("initial_failover_version", metadata.GetInitialFailoverVersion()),
 		tag.NewBoolTag("is_global_namespace_enabled", metadata.GetIsGlobalNamespaceEnabled()),
 		tag.NewStringTag("http_address", metadata.GetHttpAddress()),
-	)
+		tag.NewStringTag("metadata_duration", time.Since(metadataStart).String()),
+		tag.NewStringTag("request_type", "admin_metadata_success"))
 
+	responseStart := time.Now()
 	resp := &adminservice.DescribeClusterResponse{
 		SupportedClients:         headers.SupportedClients,
 		ServerVersion:            headers.ServerVersion,
@@ -1149,6 +1213,7 @@ func (adh *AdminHandler) DescribeCluster(
 		Tags:                     metadata.GetTags(),
 		HttpAddress:              metadata.GetHttpAddress(),
 	}
+
 	adh.logger.Info("DescribeCluster completed successfully",
 		tag.NewStringTag("cluster_id", resp.GetClusterId()),
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
@@ -1157,7 +1222,10 @@ func (adh *AdminHandler) DescribeCluster(
 		tag.NewInt64("initial_failover_version", resp.GetInitialFailoverVersion()),
 		tag.NewBoolTag("is_global_namespace_enabled", resp.GetIsGlobalNamespaceEnabled()),
 		tag.NewStringTag("http_address", resp.GetHttpAddress()),
-	)
+		tag.NewStringTag("response_duration", time.Since(responseStart).String()),
+		tag.NewStringTag("total_duration", time.Since(start).String()),
+		tag.NewStringTag("request_type", "admin_DescribeCluster_complete"))
+
 	return resp, nil
 }
 
@@ -1258,13 +1326,16 @@ func (adh *AdminHandler) AddOrUpdateRemoteCluster(
 ) (_ *adminservice.AddOrUpdateRemoteClusterResponse, retError error) {
 	defer log.CapturePanic(adh.logger, &retError)
 
+	start := time.Now()
 	frontendAddress := request.GetFrontendAddress()
 	requestID := uuid.New()
+
 	adh.logger.Info("Starting AddOrUpdateRemoteCluster request in admin handler",
 		tag.NewStringTag("frontend_address", frontendAddress),
 		tag.NewBoolTag("enable_connection", request.GetEnableRemoteClusterConnection()),
 		tag.NewStringTag("request_type", "admin_upsert"),
-		tag.NewStringTag("request_id", requestID))
+		tag.NewStringTag("request_id", requestID),
+		tag.NewStringTag("request_timestamp", start.Format(time.RFC3339)))
 
 	// Handle passthrough address
 	if u, err := url.Parse(frontendAddress); err == nil && u.Scheme == "passthrough" {

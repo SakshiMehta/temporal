@@ -28,11 +28,13 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	namespacepb "go.temporal.io/api/namespace/v1"
@@ -746,83 +748,179 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 ) (_ *operatorservice.AddOrUpdateRemoteClusterResponse, retError error) {
 	defer log.CapturePanic(h.logger, &retError)
 
+	start := time.Now()
 	frontendAddress := request.GetFrontendAddress()
-	h.logger.Info("Starting AddOrUpdateRemoteCluster request",
+	requestID := uuid.New()
+
+	h.logger.Info("Starting AddOrUpdateRemoteCluster request in operator handler",
 		tag.NewStringTag("frontend_address", frontendAddress),
 		tag.NewBoolTag("enable_connection", request.GetEnableRemoteClusterConnection()),
-		tag.NewStringTag("request_type", "upsert"))
+		tag.NewStringTag("request_type", "operator_upsert"),
+		tag.NewStringTag("request_id", requestID.String()),
+		tag.NewStringTag("request_timestamp", start.Format(time.RFC3339)))
+
+	// Log the original request details
+	h.logger.Info("AddOrUpdateRemoteCluster request details",
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewStringTag("request_type", "operator_request_details"))
 
 	// Handle passthrough address
 	if u, err := url.Parse(frontendAddress); err == nil && u.Scheme == "passthrough" {
-		h.logger.Info("Processing passthrough address",
+		h.logger.Info("Processing passthrough address in operator handler",
 			tag.NewStringTag("original_address", frontendAddress),
 			tag.NewStringTag("scheme", u.Scheme),
-			tag.NewStringTag("path", u.Path))
+			tag.NewStringTag("path", u.Path),
+			tag.NewStringTag("host", u.Host),
+			tag.NewStringTag("request_type", "operator_passthrough_parsing"))
 		// Extract the actual address from the passthrough URI and maintain the passthrough scheme
 		target := strings.TrimPrefix(u.Path, "/")
 		frontendAddress = "passthrough:///" + target
-		h.logger.Info("Converted passthrough address",
+		h.logger.Info("Converted passthrough address in operator handler",
 			tag.NewStringTag("new_address", frontendAddress),
-			tag.NewStringTag("target", target))
+			tag.NewStringTag("target", target),
+			tag.NewStringTag("request_type", "operator_passthrough_conversion"))
 	}
 
-	h.logger.Info("Creating remote admin client",
+	// Add DNS resolution logging for the frontend address
+	h.logger.Info("Attempting DNS resolution for frontend address in operator handler",
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewStringTag("request_type", "operator_dns_resolution"))
+
+	// Try to extract host and port for DNS resolution
+	if host, port, err := net.SplitHostPort(frontendAddress); err == nil {
+		h.logger.Info("Parsed host:port for DNS resolution in operator handler",
+			tag.NewStringTag("host", host),
+			tag.NewStringTag("port", port),
+			tag.NewStringTag("frontend_address", frontendAddress),
+			tag.NewStringTag("request_type", "operator_host_port_parsing"))
+
+		// Attempt DNS resolution
+		if ips, err := net.LookupHost(host); err == nil {
+			h.logger.Info("DNS resolution successful in operator handler",
+				tag.NewStringTag("host", host),
+				tag.NewStringTag("resolved_ips", strings.Join(ips, ",")),
+				tag.NewStringTag("ip_count", fmt.Sprintf("%d", len(ips))),
+				tag.NewStringTag("frontend_address", frontendAddress),
+				tag.NewStringTag("request_type", "operator_dns_success"))
+
+			// Log each resolved IP with detailed information
+			for i, ip := range ips {
+				h.logger.Info("Resolved IP details in operator handler",
+					tag.NewStringTag("ip_index", fmt.Sprintf("%d", i)),
+					tag.NewStringTag("ip", ip),
+					tag.NewStringTag("host", host),
+					tag.NewStringTag("port", port),
+					tag.NewStringTag("frontend_address", frontendAddress),
+					tag.NewStringTag("request_type", "operator_ip_details"))
+
+				// Get IP characteristics
+				if parsedIP := net.ParseIP(ip); parsedIP != nil {
+					h.logger.Info("IP characteristics in operator handler",
+						tag.NewStringTag("ip", ip),
+						tag.NewStringTag("is_loopback", fmt.Sprintf("%t", parsedIP.IsLoopback())),
+						tag.NewStringTag("is_private", fmt.Sprintf("%t", parsedIP.IsPrivate())),
+						tag.NewStringTag("is_global_unicast", fmt.Sprintf("%t", parsedIP.IsGlobalUnicast())),
+						tag.NewStringTag("host", host),
+						tag.NewStringTag("frontend_address", frontendAddress),
+						tag.NewStringTag("request_type", "operator_ip_characteristics"))
+				}
+			}
+		} else {
+			h.logger.Error("DNS resolution failed in operator handler",
+				tag.Error(err),
+				tag.NewStringTag("host", host),
+				tag.NewStringTag("frontend_address", frontendAddress),
+				tag.NewStringTag("request_type", "operator_dns_failure"))
+			// Don't return error here, as the connection might still work
+		}
+	} else {
+		h.logger.Warn("Could not parse host:port for DNS resolution in operator handler",
+			tag.Error(err),
+			tag.NewStringTag("frontend_address", frontendAddress),
+			tag.NewStringTag("request_type", "operator_host_port_parsing_failure"))
+	}
+
+	h.logger.Info("Creating remote admin client in operator handler",
 		tag.NewStringTag("frontend_address", frontendAddress),
 		tag.NewStringTag("timeout", admin.DefaultTimeout.String()),
-		tag.NewStringTag("large_timeout", admin.DefaultLargeTimeout.String()))
+		tag.NewStringTag("large_timeout", admin.DefaultLargeTimeout.String()),
+		tag.NewStringTag("request_type", "operator_client_creation"))
+
+	clientCreationStart := time.Now()
 	adminClient := h.clientFactory.NewRemoteAdminClientWithTimeout(
 		frontendAddress,
 		admin.DefaultTimeout,
 		admin.DefaultLargeTimeout,
 	)
+	h.logger.Info("Remote admin client created in operator handler",
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewStringTag("client_creation_duration", time.Since(clientCreationStart).String()),
+		tag.NewStringTag("request_type", "operator_client_created"))
 
-	// Before the call
-	h.logger.Info("[DescribeCluster] Making RPC call to remote cluster",
-		tag.NewStringTag("frontend_address", frontendAddress))
+	// Fetch cluster metadata from remote cluster
+	h.logger.Info("Fetching cluster metadata from remote cluster in operator handler",
+		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewStringTag("request_type", "operator_DescribeCluster"),
+		tag.NewStringTag("connection_type", "remote"))
 
+	describeClusterStart := time.Now()
 	resp, err := adminClient.DescribeCluster(ctx, &adminservice.DescribeClusterRequest{})
-
-	// After the call, before error handling
-	if err == nil {
-		h.logger.Info("[DescribeCluster] Successfully received cluster metadata",
-			tag.NewStringTag("frontend_address", frontendAddress),
-			tag.NewStringTag("cluster_name", resp.GetClusterName()),
-			tag.NewStringTag("cluster_id", resp.GetClusterId()))
-	} else {
-		h.logger.Error("Failed to fetch cluster metadata from remote cluster",
+	if err != nil {
+		h.logger.Error("Failed to fetch cluster metadata from remote cluster in operator handler",
 			tag.NewStringTag("frontend_address", frontendAddress),
 			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
 			tag.NewStringTag("error_details", err.Error()),
 			tag.NewStringTag("error_code", fmt.Sprintf("%v", status.Code(err))),
+			tag.NewStringTag("describe_cluster_duration", time.Since(describeClusterStart).String()),
+			tag.NewStringTag("total_duration", time.Since(start).String()),
+			tag.NewStringTag("request_type", "operator_DescribeCluster_error"),
 			tag.Error(err))
-		return nil, serviceerror.NewUnavailable(fmt.Sprintf(
-			errUnableConnectRemoteClusterMessage,
-			frontendAddress,
-			err,
-		))
+		return nil, err
 	}
 
-	h.logger.Info("Starting remote cluster metadata validation",
+	h.logger.Info("Successfully fetched cluster metadata in operator handler",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
-		tag.NewStringTag("validation_type", "metadata"))
+		tag.NewStringTag("cluster_id", resp.GetClusterId()),
+		tag.NewInt32("history_shard_count", resp.GetHistoryShardCount()),
+		tag.NewInt64("failover_version_increment", resp.GetFailoverVersionIncrement()),
+		tag.NewInt64("initial_failover_version", resp.GetInitialFailoverVersion()),
+		tag.NewBoolTag("is_global_namespace_enabled", resp.GetIsGlobalNamespaceEnabled()),
+		tag.NewStringTag("http_address", resp.GetHttpAddress()),
+		tag.NewStringTag("describe_cluster_duration", time.Since(describeClusterStart).String()),
+		tag.NewStringTag("request_type", "operator_DescribeCluster_success"))
+
+	h.logger.Info("Starting remote cluster metadata validation in operator handler",
+		tag.NewStringTag("cluster_name", resp.GetClusterName()),
+		tag.NewStringTag("validation_type", "metadata"),
+		tag.NewStringTag("request_type", "operator_validation_start"))
+
+	validationStart := time.Now()
 	err = h.validateRemoteClusterMetadata(resp)
 	if err != nil {
-		h.logger.Error("Remote cluster metadata validation failed",
+		h.logger.Error("Remote cluster metadata validation failed in operator handler",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
 			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
 			tag.NewStringTag("error_details", err.Error()),
 			tag.NewStringTag("validation_type", "metadata"),
+			tag.NewStringTag("validation_duration", time.Since(validationStart).String()),
+			tag.NewStringTag("total_duration", time.Since(start).String()),
+			tag.NewStringTag("request_type", "operator_validation_error"),
 			tag.Error(err))
-		return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errInvalidRemoteClusterInfo, err))
+		return nil, err
 	}
-	h.logger.Info("Remote cluster metadata validation successful",
+
+	h.logger.Info("Remote cluster metadata validation successful in operator handler",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
-		tag.NewStringTag("validation_type", "metadata"))
+		tag.NewStringTag("validation_type", "metadata"),
+		tag.NewStringTag("validation_duration", time.Since(validationStart).String()),
+		tag.NewStringTag("request_type", "operator_validation_success"))
 
 	var updateRequestVersion int64 = 0
-	h.logger.Info("Fetching existing cluster metadata",
+	h.logger.Info("Fetching existing cluster metadata in operator handler",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
-		tag.NewStringTag("operation", "GetClusterMetadata"))
+		tag.NewStringTag("request_type", "operator_get_metadata"))
+
+	getMetadataStart := time.Now()
 	clusterData, err := h.clusterMetadataManager.GetClusterMetadata(
 		ctx,
 		&persistence.GetClusterMetadataRequest{ClusterName: resp.GetClusterName()},
@@ -830,30 +928,34 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 	switch err.(type) {
 	case nil:
 		updateRequestVersion = clusterData.Version
-		h.logger.Info("Found existing cluster metadata",
+		h.logger.Info("Found existing cluster metadata in operator handler",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
 			tag.NewInt64("version", updateRequestVersion),
-			tag.NewStringTag("operation", "update"))
+			tag.NewStringTag("get_metadata_duration", time.Since(getMetadataStart).String()),
+			tag.NewStringTag("request_type", "operator_get_metadata_success"))
 	case *serviceerror.NotFound:
 		updateRequestVersion = 0
-		h.logger.Info("No existing cluster metadata found, will create new entry",
+		h.logger.Info("No existing cluster metadata found, will create new in operator handler",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
-			tag.NewStringTag("operation", "create"))
+			tag.NewStringTag("get_metadata_duration", time.Since(getMetadataStart).String()),
+			tag.NewStringTag("request_type", "operator_get_metadata_not_found"))
 	default:
-		h.logger.Error("Failed to get cluster metadata",
+		h.logger.Error("Failed to get cluster metadata in operator handler",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
 			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
 			tag.NewStringTag("error_details", err.Error()),
-			tag.NewStringTag("operation", "GetClusterMetadata"),
+			tag.NewStringTag("get_metadata_duration", time.Since(getMetadataStart).String()),
+			tag.NewStringTag("request_type", "operator_get_metadata_error"),
 			tag.Error(err))
-		return nil, serviceerror.NewInternal(fmt.Sprintf(errUnableToStoreClusterInfo, err))
+		return nil, err
 	}
 
-	h.logger.Info("Preparing to save cluster metadata",
+	h.logger.Info("Saving cluster metadata in operator handler",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
 		tag.NewInt64("version", updateRequestVersion),
-		tag.NewStringTag("operation", "SaveClusterMetadata"),
-		tag.NewBoolTag("is_new_cluster", updateRequestVersion == 0))
+		tag.NewStringTag("request_type", "operator_save_metadata_start"))
+
+	saveMetadataStart := time.Now()
 	applied, err := h.clusterMetadataManager.SaveClusterMetadata(ctx, &persistence.SaveClusterMetadataRequest{
 		ClusterMetadata: &persistencespb.ClusterMetadata{
 			ClusterName:              resp.GetClusterName(),
@@ -870,25 +972,32 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 		Version: updateRequestVersion,
 	})
 	if err != nil {
-		h.logger.Error("Failed to save cluster metadata",
+		h.logger.Error("Failed to save cluster metadata in operator handler",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
 			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
 			tag.NewStringTag("error_details", err.Error()),
 			tag.NewStringTag("operation", "SaveClusterMetadata"),
 			tag.NewInt64("version", updateRequestVersion),
+			tag.NewStringTag("save_metadata_duration", time.Since(saveMetadataStart).String()),
+			tag.NewStringTag("total_duration", time.Since(start).String()),
+			tag.NewStringTag("request_type", "operator_save_metadata_error"),
 			tag.Error(err))
-		return nil, serviceerror.NewInternal(fmt.Sprintf(errUnableToStoreClusterInfo, err))
+		return nil, err
 	}
 	if !applied {
-		h.logger.Error("Failed to apply cluster metadata update",
+		h.logger.Error("Failed to apply cluster metadata update in operator handler",
 			tag.NewStringTag("cluster_name", resp.GetClusterName()),
 			tag.NewInt64("version", updateRequestVersion),
 			tag.NewStringTag("operation", "SaveClusterMetadata"),
-			tag.NewStringTag("reason", "version conflict or concurrent update"))
-		return nil, serviceerror.NewInvalidArgument(fmt.Sprintf(errUnableToStoreClusterInfo, "version conflict or concurrent update"))
+			tag.NewStringTag("reason", "version conflict or concurrent update"),
+			tag.NewStringTag("save_metadata_duration", time.Since(saveMetadataStart).String()),
+			tag.NewStringTag("total_duration", time.Since(start).String()),
+			tag.NewStringTag("request_type", "operator_save_metadata_not_applied"))
+		return nil, serviceerror.NewInvalidArgument(
+			"Cannot update remote cluster due to update immutable fields")
 	}
 
-	h.logger.Info("Successfully completed AddOrUpdateRemoteCluster operation",
+	h.logger.Info("Successfully completed AddOrUpdateRemoteCluster operation in operator handler",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
 		tag.NewStringTag("cluster_id", resp.GetClusterId()),
 		tag.NewBoolTag("is_new_cluster", updateRequestVersion == 0),
@@ -898,7 +1007,9 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 		tag.NewInt64("failover_version_increment", resp.GetFailoverVersionIncrement()),
 		tag.NewInt64("initial_failover_version", resp.GetInitialFailoverVersion()),
 		tag.NewBoolTag("is_global_namespace_enabled", resp.GetIsGlobalNamespaceEnabled()),
-		tag.NewStringTag("operation", "complete"))
+		tag.NewStringTag("operation", "complete"),
+		tag.NewStringTag("total_duration", time.Since(start).String()),
+		tag.NewStringTag("request_type", "operator_operation_complete"))
 
 	return &operatorservice.AddOrUpdateRemoteClusterResponse{}, nil
 }

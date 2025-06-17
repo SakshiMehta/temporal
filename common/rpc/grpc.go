@@ -35,16 +35,14 @@ import (
 	"time"
 
 	"go.temporal.io/api/serviceerror"
-	adminservice "go.temporal.io/server/api/adminservice/v1"
 	"go.temporal.io/server/common/headers"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
-	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/persistence/serialization"
-	"go.temporal.io/server/common/rpc/interceptor"
 	serviceerrors "go.temporal.io/server/common/serviceerror"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -89,7 +87,10 @@ const (
 // https://github.com/grpc/grpc/blob/master/doc/naming.md.
 // dns resolver is used by default
 func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
-	logger.Info("[gRPC] Dial: starting connection", tag.Address(hostName))
+	logger.Info("Starting gRPC Dial",
+		tag.Address(hostName),
+		tag.NewStringTag("dial_function", "common/rpc/grpc.Dial"))
+
 	start := time.Now()
 
 	var grpcSecureOpt grpc.DialOption
@@ -97,11 +98,11 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 
 	// Log TLS configuration details
 	if tlsConfig == nil {
-		logger.Info("[gRPC] Dial: TLS configuration is nil - using insecure credentials",
+		logger.Info("TLS configuration is nil - using insecure credentials",
 			tag.Address(hostName),
 			tag.NewStringTag("tls_config", "nil"))
 	} else {
-		logger.Info("[gRPC] Dial: TLS configuration details",
+		logger.Info("TLS configuration details",
 			tag.Address(hostName),
 			tag.NewStringTag("server_name", tlsConfig.ServerName),
 			tag.NewStringTag("min_version", fmt.Sprintf("%d", tlsConfig.MinVersion)),
@@ -114,31 +115,74 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 			tag.NewStringTag("prefer_server_cipher_suites", fmt.Sprintf("%v", tlsConfig.PreferServerCipherSuites)))
 	}
 
+	// Add DNS resolution logging
+	if host, port, err := net.SplitHostPort(hostName); err == nil {
+		logger.Info("Attempting DNS resolution",
+			tag.NewStringTag("host", host),
+			tag.NewStringTag("port", port),
+			tag.Address(hostName))
+
+		if ips, err := net.LookupHost(host); err == nil {
+			logger.Info("DNS resolution successful",
+				tag.NewStringTag("host", host),
+				tag.NewStringTag("resolved_ips", strings.Join(ips, ",")),
+				tag.Address(hostName))
+
+			// Log each resolved IP with more detail
+			for i, ip := range ips {
+				logger.Info("Resolved IP details",
+					tag.NewStringTag("ip_index", fmt.Sprintf("%d", i)),
+					tag.NewStringTag("ip", ip),
+					tag.NewStringTag("host", host),
+					tag.Address(hostName))
+
+				// Try to get more info about the IP
+				if parsedIP := net.ParseIP(ip); parsedIP != nil {
+					logger.Info("IP characteristics",
+						tag.NewStringTag("ip", ip),
+						tag.NewStringTag("is_loopback", fmt.Sprintf("%t", parsedIP.IsLoopback())),
+						tag.NewStringTag("is_private", fmt.Sprintf("%t", parsedIP.IsPrivate())),
+						tag.NewStringTag("is_global_unicast", fmt.Sprintf("%t", parsedIP.IsGlobalUnicast())),
+						tag.Address(hostName))
+				}
+			}
+		} else {
+			logger.Error("DNS resolution failed",
+				tag.Error(err),
+				tag.NewStringTag("host", host),
+				tag.Address(hostName))
+		}
+	} else {
+		logger.Warn("Could not split host:port for DNS resolution",
+			tag.Error(err),
+			tag.Address(hostName))
+	}
+
 	// Handle passthrough addresses specially
 	if u, err := url.Parse(hostName); err == nil && u.Scheme == "passthrough" {
-		logger.Info("[gRPC] Dial: detected passthrough scheme", tag.Address(hostName))
+		logger.Info("Detected passthrough scheme", tag.Address(hostName))
 		hostName = "passthrough:" + strings.TrimPrefix(u.Path, "/")
-		logger.Info("[gRPC] Dial: normalized passthrough address", tag.Address(hostName))
+		logger.Info("Normalized passthrough address", tag.Address(hostName))
 		customDialer := func(ctx context.Context, addr string) (net.Conn, error) {
-			logger.Info("[gRPC] Dial: custom passthrough dialer invoked", tag.Address(addr))
+			logger.Info("Custom passthrough dialer invoked", tag.Address(addr))
 			dialer := &net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}
 			addrWithoutPrefix := strings.TrimPrefix(addr, "passthrough:")
-			logger.Info("[gRPC] Dial: custom dialer connecting to", tag.Address(addrWithoutPrefix))
+			logger.Info("Custom dialer connecting to", tag.Address(addrWithoutPrefix))
 			return dialer.DialContext(ctx, "tcp", addrWithoutPrefix)
 		}
 		dialOptions = append(dialOptions, grpc.WithContextDialer(customDialer))
 	}
 
 	if tlsConfig == nil {
-		logger.Info("[gRPC] Dial: using insecure credentials",
+		logger.Info("Using insecure credentials",
 			tag.Address(hostName),
 			tag.NewStringTag("reason", "tls_config_is_nil"))
 		grpcSecureOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
 	} else {
-		logger.Info("[gRPC] Dial: using TLS credentials",
+		logger.Info("Using TLS credentials",
 			tag.Address(hostName),
 			tag.NewStringTag("server_name", tlsConfig.ServerName),
 			tag.NewStringTag("cert_count", fmt.Sprintf("%d", len(tlsConfig.Certificates))))
@@ -148,7 +192,7 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 			host = hostName
 		}
 		tlsConfigCopy.ServerName = host
-		logger.Info("[gRPC] Dial: setting TLS server name",
+		logger.Info("Setting TLS server name",
 			tag.Address(hostName),
 			tag.NewStringTag("original_server_name", tlsConfig.ServerName),
 			tag.NewStringTag("new_server_name", host))
@@ -166,11 +210,7 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxInternodeRecvPayloadSize)),
 		grpc.WithChainUnaryInterceptor(
 			headersInterceptor,
-			metrics.NewClientMetricsTrailerPropagatorInterceptor(logger),
 			errorInterceptor,
-		),
-		grpc.WithChainStreamInterceptor(
-			interceptor.StreamErrorInterceptor,
 		),
 		grpc.WithDefaultServiceConfig(DefaultServiceConfig),
 		grpc.WithDisableServiceConfig(),
@@ -183,13 +223,25 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 		adminServiceLoggingInterceptor(logger),
 	))
 
-	logger.Info("[gRPC] Dial: dialing grpc.NewClient", tag.Address(hostName))
+	logger.Info("Dialing grpc.NewClient",
+		tag.Address(hostName),
+		tag.NewStringTag("dial_options_count", fmt.Sprintf("%d", len(dialOptions))))
+
 	conn, err := grpc.NewClient(hostName, dialOptions...)
 	if err != nil {
-		logger.Error("[gRPC] Dial: failed to create gRPC connection", tag.Error(err), tag.Address(hostName))
+		logger.Error("Failed to create gRPC connection",
+			tag.Error(err),
+			tag.Address(hostName),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("duration", time.Since(start).String()))
 		return nil, err
 	}
-	logger.Info("[gRPC] Dial: successfully created gRPC connection", tag.Address(hostName), tag.NewStringTag("duration", time.Since(start).String()))
+
+	logger.Info("Successfully created gRPC connection",
+		tag.Address(hostName),
+		tag.NewStringTag("duration", time.Since(start).String()),
+		tag.NewStringTag("connection_state", conn.GetState().String()))
+
 	return conn, nil
 }
 
@@ -284,76 +336,85 @@ func adminServiceLoggingInterceptor(logger log.Logger) grpc.UnaryClientIntercept
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		startTime := time.Now()
 		connState := cc.GetState().String()
+		connTarget := cc.Target()
 
-		// Log before the call
-		logger.Info("[AdminService] Starting RPC call",
+		// Log connection state before the call
+		logger.Info("[AdminService] Connection state before RPC call",
 			tag.NewStringTag("method", method),
-			tag.NewStringTag("target", cc.Target()),
-			tag.NewStringTag("request_type", fmt.Sprintf("%T", req)),
-			tag.NewStringTag("connection_state", connState))
+			tag.NewStringTag("target", connTarget),
+			tag.NewStringTag("connection_state", connState),
+			tag.NewStringTag("connection_id", fmt.Sprintf("%p", cc)))
 
-		// For DescribeCluster specifically, log detailed request information
-		if method == "/temporal.server.api.adminservice.v1.AdminService/DescribeCluster" {
-			if req, ok := req.(*adminservice.DescribeClusterRequest); ok {
-				logger.Info("[AdminService] DescribeCluster request details",
-					tag.NewStringTag("cluster_name", req.GetClusterName()),
-					tag.NewStringTag("target", cc.Target()),
-					tag.NewStringTag("connection_state", connState),
-					tag.NewStringTag("request_id", fmt.Sprintf("%p", req)), // Add request ID for correlation
-					tag.NewStringTag("timestamp", startTime.Format(time.RFC3339)))
-			}
+		// For PollActivityTaskQueue specifically, add more detailed logging
+		if method == "/temporal.server.api.matchingservice.v1.MatchingService/PollActivityTaskQueue" {
+			logger.Info("[AdminService] PollActivityTaskQueue request details",
+				tag.NewStringTag("target", connTarget),
+				tag.NewStringTag("connection_state", connState),
+				tag.NewStringTag("connection_id", fmt.Sprintf("%p", req)))
 		}
 
 		// Make the actual call
 		err := invoker(ctx, method, req, reply, cc, opts...)
 		duration := time.Since(startTime)
+		newConnState := cc.GetState().String()
+
+		// Log connection state after the call
+		if newConnState != connState {
+			logger.Info("[AdminService] Connection state changed during RPC call",
+				tag.NewStringTag("method", method),
+				tag.NewStringTag("target", connTarget),
+				tag.NewStringTag("old_state", connState),
+				tag.NewStringTag("new_state", newConnState),
+				tag.NewStringTag("connection_id", fmt.Sprintf("%p", cc)),
+				tag.NewStringTag("duration", duration.String()))
+		}
 
 		// Log after the call
 		if err != nil {
 			st, _ := status.FromError(err)
-			logger.Error("[AdminService] RPC call failed",
-				tag.Error(err),
-				tag.NewStringTag("method", method),
-				tag.NewStringTag("target", cc.Target()),
-				tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
-				tag.NewStringTag("error_code", st.Code().String()),
-				tag.NewStringTag("duration", duration.String()),
-				tag.NewStringTag("connection_state", cc.GetState().String()))
-
-			// For DescribeCluster specifically, log more error details
-			if method == "/temporal.server.api.adminservice.v1.AdminService/DescribeCluster" {
-				logger.Error("[AdminService] DescribeCluster call failed",
+			// Check for specific error types
+			if st.Code() == codes.Unavailable {
+				logger.Error("[AdminService] RPC call failed - service unavailable",
 					tag.Error(err),
-					tag.NewStringTag("target", cc.Target()),
+					tag.NewStringTag("method", method),
+					tag.NewStringTag("target", connTarget),
 					tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
 					tag.NewStringTag("error_code", st.Code().String()),
-					tag.NewStringTag("error_details", err.Error()),
 					tag.NewStringTag("duration", duration.String()),
-					tag.NewStringTag("connection_state", cc.GetState().String()),
-					tag.NewStringTag("request_id", fmt.Sprintf("%p", req))) // Add request ID for correlation
+					tag.NewStringTag("connection_state", newConnState),
+					tag.NewStringTag("connection_id", fmt.Sprintf("%p", cc)),
+					tag.NewStringTag("error_details", st.Message()),
+					tag.NewStringTag("debug_data", fmt.Sprintf("%v", st.Details())))
+
+				// For PollActivityTaskQueue, add specific graceful shutdown detection
+				if method == "/temporal.server.api.matchingservice.v1.MatchingService/PollActivityTaskQueue" {
+					if strings.Contains(st.Message(), "graceful_stop") {
+						logger.Error("[AdminService] PollActivityTaskQueue failed due to graceful shutdown",
+							tag.NewStringTag("target", connTarget),
+							tag.NewStringTag("connection_state", newConnState),
+							tag.NewStringTag("connection_id", fmt.Sprintf("%p", cc)),
+							tag.NewStringTag("duration", duration.String()),
+							tag.NewStringTag("error_details", st.Message()))
+					}
+				}
+			} else {
+				logger.Error("[AdminService] RPC call failed",
+					tag.Error(err),
+					tag.NewStringTag("method", method),
+					tag.NewStringTag("target", connTarget),
+					tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+					tag.NewStringTag("error_code", st.Code().String()),
+					tag.NewStringTag("duration", duration.String()),
+					tag.NewStringTag("connection_state", newConnState),
+					tag.NewStringTag("connection_id", fmt.Sprintf("%p", cc)))
 			}
 		} else {
 			logger.Info("[AdminService] RPC call succeeded",
 				tag.NewStringTag("method", method),
-				tag.NewStringTag("target", cc.Target()),
+				tag.NewStringTag("target", connTarget),
 				tag.NewStringTag("duration", duration.String()),
-				tag.NewStringTag("connection_state", cc.GetState().String()))
-
-			// For DescribeCluster specifically, log detailed response information
-			if method == "/temporal.server.api.adminservice.v1.AdminService/DescribeCluster" {
-				if resp, ok := reply.(*adminservice.DescribeClusterResponse); ok {
-					logger.Info("[AdminService] DescribeCluster response details",
-						tag.NewStringTag("cluster_name", resp.GetClusterName()),
-						tag.NewStringTag("cluster_id", resp.GetClusterId()),
-						tag.NewStringTag("target", cc.Target()),
-						tag.NewStringTag("duration", duration.String()),
-						tag.NewStringTag("connection_state", cc.GetState().String()),
-						tag.NewStringTag("history_shard_count", fmt.Sprintf("%d", resp.GetHistoryShardCount())),
-						tag.NewStringTag("persistence_store", resp.GetPersistenceStore()),
-						tag.NewStringTag("visibility_store", resp.GetVisibilityStore()),
-						tag.NewStringTag("request_id", fmt.Sprintf("%p", req))) // Add request ID for correlation
-				}
-			}
+				tag.NewStringTag("connection_state", newConnState),
+				tag.NewStringTag("connection_id", fmt.Sprintf("%p", cc)))
 		}
 
 		return err

@@ -207,7 +207,10 @@ func getListenIP(cfg *config.RPC, logger log.Logger) net.IP {
 
 // CreateRemoteFrontendGRPCConnection creates connection for gRPC calls
 func (d *RPCFactory) CreateRemoteFrontendGRPCConnection(rpcAddress string) *grpc.ClientConn {
-	d.logger.Info("Starting CreateRemoteFrontendGRPCConnection", tag.Address(rpcAddress))
+	d.logger.Info("Starting CreateRemoteFrontendGRPCConnection",
+		tag.Address(rpcAddress),
+		tag.NewStringTag("connection_type", "remote_frontend"))
+
 	start := time.Now()
 	var tlsClientConfig *tls.Config
 	if d.tlsFactory != nil {
@@ -216,30 +219,80 @@ func (d *RPCFactory) CreateRemoteFrontendGRPCConnection(rpcAddress string) *grpc
 
 		// Try parsing the address as a URI
 		if u, parseErr := url.Parse(rpcAddress); parseErr == nil && u.Scheme != "" && strings.Contains(rpcAddress, "://") {
+			d.logger.Info("Parsed address as URI",
+				tag.NewStringTag("original_address", rpcAddress),
+				tag.NewStringTag("scheme", u.Scheme),
+				tag.NewStringTag("host", u.Host),
+				tag.NewStringTag("path", u.Path))
 			target = strings.TrimPrefix(u.Path, "/") // remove any leading slashes
 		}
 
 		hostname, _, err := net.SplitHostPort(target)
 		if err != nil {
+			d.logger.Error("Invalid rpcAddress for remote cluster. Unable to extract host:port",
+				tag.Error(err),
+				tag.NewStringTag("target", target),
+				tag.NewStringTag("original_address", rpcAddress))
 			d.logger.Fatal("Invalid rpcAddress for remote cluster. Unable to extract host:port", tag.Error(err))
+			return nil
 		}
+
+		d.logger.Info("Extracted hostname for TLS config",
+			tag.NewStringTag("hostname", hostname),
+			tag.NewStringTag("target", target),
+			tag.NewStringTag("original_address", rpcAddress))
 
 		tlsClientConfig, err = d.tlsFactory.GetRemoteClusterClientConfig(hostname)
 
 		if err != nil {
+			d.logger.Error("Failed to create tls config for gRPC connection",
+				tag.Error(err),
+				tag.NewStringTag("hostname", hostname),
+				tag.NewStringTag("original_address", rpcAddress))
 			d.logger.Fatal("Failed to create tls config for gRPC connection", tag.Error(err))
 			return nil
 		}
 	}
 
 	if tlsClientConfig != nil {
-		d.logger.Info("TLS config loaded", tag.NewStringTag("serverName", tlsClientConfig.ServerName))
+		d.logger.Info("TLS config loaded successfully",
+			tag.NewStringTag("serverName", tlsClientConfig.ServerName),
+			tag.NewStringTag("min_version", fmt.Sprintf("%d", tlsClientConfig.MinVersion)),
+			tag.NewStringTag("max_version", fmt.Sprintf("%d", tlsClientConfig.MaxVersion)),
+			tag.NewBoolTag("insecure_skip_verify", tlsClientConfig.InsecureSkipVerify),
+			tag.NewStringTag("cert_count", fmt.Sprintf("%d", len(tlsClientConfig.Certificates))),
+			tag.NewStringTag("root_ca_count", fmt.Sprintf("%d", len(tlsClientConfig.RootCAs.Subjects()))),
+			tag.NewStringTag("original_address", rpcAddress))
 	} else {
-		d.logger.Info("No TLS config, using insecure connection")
+		d.logger.Info("No TLS config, using insecure connection",
+			tag.NewStringTag("original_address", rpcAddress))
+	}
+
+	// Add DNS resolution logging
+	if host, port, err := net.SplitHostPort(rpcAddress); err == nil {
+		d.logger.Info("Attempting DNS resolution",
+			tag.NewStringTag("host", host),
+			tag.NewStringTag("port", port),
+			tag.NewStringTag("original_address", rpcAddress))
+
+		if ips, err := net.LookupHost(host); err == nil {
+			d.logger.Info("DNS resolution successful",
+				tag.NewStringTag("host", host),
+				tag.NewStringTag("resolved_ips", strings.Join(ips, ",")),
+				tag.NewStringTag("original_address", rpcAddress))
+		} else {
+			d.logger.Warn("DNS resolution failed",
+				tag.Error(err),
+				tag.NewStringTag("host", host),
+				tag.NewStringTag("original_address", rpcAddress))
+		}
 	}
 
 	connection := d.dial(rpcAddress, tlsClientConfig)
-	d.logger.Info("Finished CreateRemoteFrontendGRPCConnection", tag.Address(rpcAddress), tag.NewStringTag("duration", time.Since(start).String()))
+	d.logger.Info("Finished CreateRemoteFrontendGRPCConnection",
+		tag.Address(rpcAddress),
+		tag.NewStringTag("duration", time.Since(start).String()),
+		tag.NewStringTag("connection_state", connection.GetState().String()))
 	return connection
 }
 
@@ -268,19 +321,75 @@ func (d *RPCFactory) CreateInternodeGRPCConnection(hostName string) *grpc.Client
 }
 
 func (d *RPCFactory) dial(hostName string, tlsClientConfig *tls.Config) *grpc.ClientConn {
-	d.logger.Info("Starting dial", tag.Address(hostName))
+	d.logger.Info("Starting dial",
+		tag.Address(hostName),
+		tag.NewStringTag("dial_type", "remote_frontend"))
+
 	start := time.Now()
+
+	// Log connection details
 	if tlsClientConfig != nil {
-		d.logger.Info("TLS config loaded", tag.NewStringTag("serverName", tlsClientConfig.ServerName))
+		d.logger.Info("TLS config loaded for dial",
+			tag.NewStringTag("serverName", tlsClientConfig.ServerName),
+			tag.NewStringTag("min_version", fmt.Sprintf("%d", tlsClientConfig.MinVersion)),
+			tag.NewStringTag("max_version", fmt.Sprintf("%d", tlsClientConfig.MaxVersion)),
+			tag.NewBoolTag("insecure_skip_verify", tlsClientConfig.InsecureSkipVerify),
+			tag.NewStringTag("cert_count", fmt.Sprintf("%d", len(tlsClientConfig.Certificates))),
+			tag.NewStringTag("target_address", hostName))
 	} else {
-		d.logger.Info("No TLS config, using insecure connection")
+		d.logger.Info("No TLS config, using insecure connection for dial",
+			tag.NewStringTag("target_address", hostName))
 	}
+
+	// Add detailed DNS resolution logging
+	if host, port, err := net.SplitHostPort(hostName); err == nil {
+		d.logger.Info("Attempting DNS resolution for dial",
+			tag.NewStringTag("host", host),
+			tag.NewStringTag("port", port),
+			tag.NewStringTag("target_address", hostName))
+
+		if ips, err := net.LookupHost(host); err == nil {
+			d.logger.Info("DNS resolution successful for dial",
+				tag.NewStringTag("host", host),
+				tag.NewStringTag("resolved_ips", strings.Join(ips, ",")),
+				tag.NewStringTag("target_address", hostName))
+
+			// Log each resolved IP
+			for i, ip := range ips {
+				d.logger.Info("Resolved IP for dial",
+					tag.NewStringTag("ip_index", fmt.Sprintf("%d", i)),
+					tag.NewStringTag("ip", ip),
+					tag.NewStringTag("host", host),
+					tag.NewStringTag("target_address", hostName))
+			}
+		} else {
+			d.logger.Error("DNS resolution failed for dial",
+				tag.Error(err),
+				tag.NewStringTag("host", host),
+				tag.NewStringTag("target_address", hostName))
+		}
+	} else {
+		d.logger.Warn("Could not split host:port for DNS resolution",
+			tag.Error(err),
+			tag.NewStringTag("target_address", hostName))
+	}
+
 	connection, err := Dial(hostName, tlsClientConfig, d.logger, d.dialOptions...)
 	if err != nil {
+		d.logger.Error("Failed to create gRPC connection in dial",
+			tag.Error(err),
+			tag.NewStringTag("target_address", hostName),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("duration", time.Since(start).String()))
 		d.logger.Fatal("Failed to create gRPC connection", tag.Error(err))
 		return nil
 	}
-	d.logger.Info("Finished dial", tag.Address(hostName), tag.NewStringTag("duration", time.Since(start).String()))
+
+	d.logger.Info("Finished dial successfully",
+		tag.Address(hostName),
+		tag.NewStringTag("duration", time.Since(start).String()),
+		tag.NewStringTag("connection_state", connection.GetState().String()),
+		tag.NewStringTag("target_address", hostName))
 	return connection
 }
 

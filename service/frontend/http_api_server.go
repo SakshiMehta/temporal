@@ -38,6 +38,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"github.com/pborman/uuid"
 	"go.temporal.io/api/operatorservice/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
@@ -175,6 +176,7 @@ func NewHTTPAPIServer(
 		interceptors,
 		metricsHandler,
 		namespaceRegistry,
+		logger,
 	)
 
 	// Create serve mux
@@ -364,6 +366,7 @@ type inlineClientConn struct {
 	interceptor       grpc.UnaryServerInterceptor
 	requestsCounter   metrics.CounterIface
 	namespaceRegistry namespace.Registry
+	logger            log.Logger
 }
 
 var _ grpc.ClientConnInterface = (*inlineClientConn)(nil)
@@ -382,6 +385,7 @@ func newInlineClientConn(
 	interceptors []grpc.UnaryServerInterceptor,
 	metricsHandler metrics.Handler,
 	namespaceRegistry namespace.Registry,
+	logger log.Logger,
 ) *inlineClientConn {
 	// Create the set of methods via reflection. We currently accept the overhead
 	// of reflection compared to having to custom generate gateway code.
@@ -424,6 +428,7 @@ func newInlineClientConn(
 		interceptor:       chainUnaryServerInterceptors(interceptors),
 		requestsCounter:   metrics.HTTPServiceRequests.With(metricsHandler),
 		namespaceRegistry: namespaceRegistry,
+		logger:            log.With(logger, tag.NewStringTag("component", "inlineClientConn")),
 	}
 }
 
@@ -434,56 +439,195 @@ func (i *inlineClientConn) Invoke(
 	reply any,
 	opts ...grpc.CallOption,
 ) error {
+	start := time.Now()
+	requestID := uuid.New()
+
+	// Log the incoming request details
+	logger := log.With(i.logger,
+		tag.NewStringTag("method", method),
+		tag.NewStringTag("request_id", requestID),
+		tag.NewStringTag("request_type", "inline_client_invoke"),
+		tag.NewStringTag("request_timestamp", start.Format(time.RFC3339)))
+
+	logger.Info("Starting inline client Invoke",
+		tag.NewStringTag("method", method),
+		tag.NewStringTag("args_type", fmt.Sprintf("%T", args)),
+		tag.NewStringTag("reply_type", fmt.Sprintf("%T", reply)),
+		tag.NewStringTag("opts_count", fmt.Sprintf("%d", len(opts))))
+
+	// Log context details
+	if md, ok := metadata.FromOutgoingContext(ctx); ok {
+		keys := make([]string, 0, len(md))
+		for k := range md {
+			keys = append(keys, k)
+		}
+		logger.Info("Outgoing metadata found in context",
+			tag.NewStringTag("metadata_keys", strings.Join(keys, ",")),
+			tag.NewStringTag("client_name", strings.Join(md[headers.ClientNameHeaderName], ",")),
+			tag.NewStringTag("client_version", strings.Join(md[headers.ClientVersionHeaderName], ",")),
+			tag.NewStringTag("request_type", "inline_metadata_outgoing"))
+	} else {
+		logger.Info("No outgoing metadata found in context",
+			tag.NewStringTag("request_type", "inline_metadata_none"))
+	}
+
 	// Move outgoing metadata to incoming and set new outgoing metadata
 	md, _ := metadata.FromOutgoingContext(ctx)
+
+	// Log metadata before modification
+	keys := make([]string, 0, len(md))
+	for k := range md {
+		keys = append(keys, k)
+	}
+	logger.Info("Processing metadata for inline client",
+		tag.NewStringTag("original_metadata_keys", strings.Join(keys, ",")),
+		tag.NewStringTag("request_type", "inline_metadata_processing"))
+
 	// Set the client and version headers if not already set
 	if len(md[headers.ClientNameHeaderName]) == 0 {
 		md.Set(headers.ClientNameHeaderName, headers.ClientNameServerHTTP)
+		logger.Info("Set default client name header",
+			tag.NewStringTag("client_name", headers.ClientNameServerHTTP),
+			tag.NewStringTag("request_type", "inline_client_name_set"))
 	}
 	if len(md[headers.ClientVersionHeaderName]) == 0 {
 		md.Set(headers.ClientVersionHeaderName, headers.ServerVersion)
+		logger.Info("Set default client version header",
+			tag.NewStringTag("client_version", headers.ServerVersion),
+			tag.NewStringTag("request_type", "inline_client_version_set"))
 	}
+
 	ctx = metadata.NewIncomingContext(ctx, md)
 	outgoingMD := metadata.MD{}
 	ctx = metadata.NewOutgoingContext(ctx, outgoingMD)
 
+	logger.Info("Metadata context created for inline client",
+		tag.NewStringTag("final_metadata_keys", strings.Join(keys, ",")),
+		tag.NewStringTag("request_type", "inline_metadata_final"))
+
 	// Get the method. Should never fail, but we check anyways
 	serviceMethod := i.methods[method]
 	if serviceMethod == nil {
+		methodKeys := make([]string, 0, len(i.methods))
+		for k := range i.methods {
+			methodKeys = append(methodKeys, k)
+		}
+		logger.Error("Method not found in inline client",
+			tag.NewStringTag("method", method),
+			tag.NewStringTag("available_methods", strings.Join(methodKeys, ",")),
+			tag.NewStringTag("request_type", "inline_method_not_found"))
 		return status.Error(codes.NotFound, "call not found")
 	}
 
+	logger.Info("Found service method for inline client",
+		tag.NewStringTag("method", method),
+		tag.NewStringTag("full_method", serviceMethod.info.FullMethod),
+		tag.NewStringTag("request_type", "inline_method_found"))
+
 	// Add metric
 	var namespaceTag metrics.Tag
-	if namespaceName := interceptor.MustGetNamespaceName(i.namespaceRegistry, args); namespaceName != "" {
+	var namespaceName namespace.Name
+	if namespaceName = interceptor.MustGetNamespaceName(i.namespaceRegistry, args); namespaceName != "" {
 		namespaceTag = metrics.NamespaceTag(namespaceName.String())
+		logger.Info("Namespace identified for inline client",
+			tag.NewStringTag("namespace", namespaceName.String()),
+			tag.NewStringTag("request_type", "inline_namespace_found"))
 	} else {
 		namespaceTag = metrics.NamespaceUnknownTag()
+		logger.Info("No namespace identified for inline client",
+			tag.NewStringTag("request_type", "inline_namespace_unknown"))
 	}
 	i.requestsCounter.Record(1, metrics.OperationTag(method), namespaceTag)
+
+	// Log before invoking the handler
+	logger.Info("Invoking service method in inline client",
+		tag.NewStringTag("method", method),
+		tag.NewStringTag("namespace", namespaceName.String()),
+		tag.NewStringTag("has_interceptor", fmt.Sprintf("%t", i.interceptor != nil)),
+		tag.NewStringTag("request_type", "inline_invoke_start"))
 
 	// Invoke
 	var resp any
 	var err error
+	invokeStart := time.Now()
 	if i.interceptor == nil {
 		resp, err = serviceMethod.handler(ctx, args)
+		logger.Info("Direct handler invocation completed in inline client",
+			tag.NewStringTag("method", method),
+			tag.NewStringTag("invoke_duration", time.Since(invokeStart).String()),
+			tag.NewStringTag("has_error", fmt.Sprintf("%t", err != nil)),
+			tag.NewStringTag("request_type", "inline_direct_handler"))
 	} else {
 		resp, err = i.interceptor(ctx, args, &serviceMethod.info, serviceMethod.handler)
+		logger.Info("Intercepted handler invocation completed in inline client",
+			tag.NewStringTag("method", method),
+			tag.NewStringTag("invoke_duration", time.Since(invokeStart).String()),
+			tag.NewStringTag("has_error", fmt.Sprintf("%t", err != nil)),
+			tag.NewStringTag("request_type", "inline_intercepted_handler"))
+	}
+
+	// Log error details if any
+	if err != nil {
+		logger.Error("Service method invocation failed in inline client",
+			tag.NewStringTag("method", method),
+			tag.NewStringTag("error_type", fmt.Sprintf("%T", err)),
+			tag.NewStringTag("error_details", err.Error()),
+			tag.NewStringTag("invoke_duration", time.Since(invokeStart).String()),
+			tag.NewStringTag("total_duration", time.Since(start).String()),
+			tag.NewStringTag("request_type", "inline_invoke_error"),
+			tag.Error(err))
+	} else {
+		logger.Info("Service method invocation succeeded in inline client",
+			tag.NewStringTag("method", method),
+			tag.NewStringTag("response_type", fmt.Sprintf("%T", resp)),
+			tag.NewStringTag("invoke_duration", time.Since(invokeStart).String()),
+			tag.NewStringTag("request_type", "inline_invoke_success"))
 	}
 
 	// Find the header call option and set response headers. We accept that if
 	// somewhere internally the metadata was replaced instead of appended to, this
 	// does not work.
+	headerOptionsFound := 0
 	for _, opt := range opts {
 		if callOpt, ok := opt.(grpc.HeaderCallOption); ok {
 			*callOpt.HeaderAddr = outgoingMD
+			headerOptionsFound++
+			logger.Info("Set header call option in inline client",
+				tag.NewStringTag("option_type", fmt.Sprintf("%T", opt)),
+				tag.NewStringTag("request_type", "inline_header_option"))
 		}
 	}
 
+	logger.Info("Processed call options in inline client",
+		tag.NewStringTag("total_options", fmt.Sprintf("%d", len(opts))),
+		tag.NewStringTag("header_options", fmt.Sprintf("%d", headerOptionsFound)),
+		tag.NewStringTag("request_type", "inline_call_options"))
+
 	// Merge the response proto onto the wanted reply if non-nil
-	if respProto, _ := resp.(proto.Message); respProto != nil {
-		proto.Merge(reply.(proto.Message), respProto)
+	if respProto, ok := resp.(proto.Message); respProto != nil && ok {
+		if replyProto, ok := reply.(proto.Message); ok {
+			proto.Merge(replyProto, respProto)
+			logger.Info("Merged response proto in inline client",
+				tag.NewStringTag("response_type", fmt.Sprintf("%T", respProto)),
+				tag.NewStringTag("reply_type", fmt.Sprintf("%T", replyProto)),
+				tag.NewStringTag("request_type", "inline_proto_merge"))
+		} else {
+			logger.Warn("Reply is not a proto message in inline client",
+				tag.NewStringTag("reply_type", fmt.Sprintf("%T", reply)),
+				tag.NewStringTag("request_type", "inline_proto_merge_skip"))
+		}
+	} else {
+		logger.Info("No response proto to merge in inline client",
+			tag.NewStringTag("response_type", fmt.Sprintf("%T", resp)),
+			tag.NewStringTag("request_type", "inline_proto_no_merge"))
 	}
+
+	logger.Info("Completed inline client Invoke",
+		tag.NewStringTag("method", method),
+		tag.NewStringTag("namespace", namespaceName.String()),
+		tag.NewStringTag("has_error", fmt.Sprintf("%t", err != nil)),
+		tag.NewStringTag("total_duration", time.Since(start).String()),
+		tag.NewStringTag("request_type", "inline_invoke_complete"))
 
 	return err
 }
