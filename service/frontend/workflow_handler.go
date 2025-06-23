@@ -96,6 +96,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -2919,6 +2920,26 @@ func (wh *WorkflowHandler) DescribeTaskQueue(ctx context.Context, request *workf
 
 // GetClusterInfo return information about Temporal deployment.
 func (wh *WorkflowHandler) GetClusterInfo(ctx context.Context, _ *workflowservice.GetClusterInfoRequest) (_ *workflowservice.GetClusterInfoResponse, retError error) {
+	start := time.Now()
+	wh.logger.Info("GetClusterInfo called",
+		tag.NewStringTag("context_type", fmt.Sprintf("%T", ctx)),
+		tag.NewStringTag("context_pointer", fmt.Sprintf("%p", ctx)),
+		tag.NewStringTag("request_timestamp", start.Format(time.RFC3339)))
+
+	// Log gRPC metadata if present
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		wh.logger.Info("Incoming gRPC metadata found",
+			tag.NewStringTag("metadata_keys", fmt.Sprintf("%v", getMetadataKeys(md))),
+			tag.NewStringTag("metadata_values", fmt.Sprintf("%v", md)))
+	} else {
+		wh.logger.Info("No incoming gRPC metadata found")
+	}
+
+	// Log custom context values if any (example for known keys)
+	if traceID, ok := ctx.Value("traceID").(string); ok {
+		wh.logger.Info("Custom context value found", tag.NewStringTag("traceID", traceID))
+	}
+
 	defer log.CapturePanic(wh.logger, &retError)
 
 	metadata, err := wh.clusterMetadataManager.GetCurrentClusterMetadata(ctx)
@@ -2936,6 +2957,15 @@ func (wh *WorkflowHandler) GetClusterInfo(ctx context.Context, _ *workflowservic
 		PersistenceStore:  wh.persistenceExecutionName,
 		VisibilityStore:   strings.Join(wh.visibilityMgr.GetStoreNames(), ","),
 	}, nil
+}
+
+// getMetadataKeys returns a slice of keys from metadata.MD
+func getMetadataKeys(md metadata.MD) []string {
+	keys := make([]string, 0, len(md))
+	for k := range md {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // GetSystemInfo returns information about the Temporal system.

@@ -26,6 +26,7 @@ package cassandra
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"time"
@@ -33,8 +34,10 @@ import (
 	"github.com/pborman/uuid"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/log/tag"
 	p "go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/persistence/nosql/nosqlplugin/cassandra/gocql"
+	"google.golang.org/grpc/metadata"
 )
 
 const constMetadataPartition = 0
@@ -126,6 +129,32 @@ func (m *ClusterMetadataStore) GetClusterMetadata(
 	ctx context.Context,
 	request *p.InternalGetClusterMetadataRequest,
 ) (*p.InternalGetClusterMetadataResponse, error) {
+	m.logger.Info("GetClusterMetadata called",
+		tag.NewStringTag("context_type", fmt.Sprintf("%T", ctx)),
+		tag.NewStringTag("context_pointer", fmt.Sprintf("%p", ctx)),
+		tag.NewStringTag("request_timestamp", time.Now().Format(time.RFC3339)))
+
+	// Log gRPC metadata if present
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		m.logger.Info("Incoming gRPC metadata found in GetClusterMetadata",
+			tag.NewStringTag("metadata_keys", fmt.Sprintf("%v", getMetadataKeys(md))),
+			tag.NewStringTag("metadata_values", fmt.Sprintf("%v", md)))
+	} else {
+		m.logger.Info("No incoming gRPC metadata found in GetClusterMetadata")
+	}
+
+	deadline, hasDeadline := ctx.Deadline()
+	if hasDeadline {
+		m.logger.Info("Context deadline set in GetClusterMetadata", tag.NewStringTag("deadline", deadline.Format(time.RFC3339)))
+	} else {
+		m.logger.Info("No context deadline set in GetClusterMetadata")
+	}
+
+	if err := ctx.Err(); err != nil {
+		m.logger.Info("Context error in GetClusterMetadata", tag.NewStringTag("error", err.Error()))
+	} else {
+		m.logger.Info("No context error in GetClusterMetadata")
+	}
 
 	var clusterMetadata []byte
 	var encoding string
@@ -297,6 +326,15 @@ func (m *ClusterMetadataStore) PruneClusterMembership(
 	request *p.PruneClusterMembershipRequest,
 ) error {
 	return nil
+}
+
+// getMetadataKeys returns a slice of keys from metadata.MD.
+func getMetadataKeys(md metadata.MD) []string {
+	keys := make([]string, 0, len(md))
+	for k := range md {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func (m *ClusterMetadataStore) GetName() string {

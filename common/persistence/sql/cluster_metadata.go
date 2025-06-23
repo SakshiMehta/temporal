@@ -33,6 +33,7 @@ import (
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/log/tag"
 	p "go.temporal.io/server/common/persistence"
 	"go.temporal.io/server/common/persistence/sql/sqlplugin"
 )
@@ -90,11 +91,16 @@ func (s *sqlClusterMetadataManager) GetClusterMetadata(
 	ctx context.Context,
 	request *p.InternalGetClusterMetadataRequest,
 ) (*p.InternalGetClusterMetadataResponse, error) {
+	s.logger.Info("GetClusterMetadata called", tag.Operation("GetClusterMetadata"), tag.ClusterName(request.ClusterName))
+
 	row, err := s.Db.GetClusterMetadata(ctx, &sqlplugin.ClusterMetadataFilter{ClusterName: request.ClusterName})
 
 	if err != nil {
+		s.logger.Error("GetClusterMetadata failed", tag.Operation("GetClusterMetadata"), tag.ClusterName(request.ClusterName), tag.Error(err))
 		return nil, convertCommonErrors("GetClusterMetadata", err)
 	}
+
+	s.logger.Info("GetClusterMetadata succeeded", tag.Operation("GetClusterMetadata"), tag.ClusterName(request.ClusterName), tag.NewInt64("version", row.Version))
 
 	return &p.InternalGetClusterMetadataResponse{
 		ClusterMetadata: p.NewDataBlob(row.Data, row.DataEncoding),

@@ -27,12 +27,16 @@ package persistence
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	persistencespb "go.temporal.io/server/api/persistence/v1"
 	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/log/tag"
 	"go.temporal.io/server/common/persistence/serialization"
+	"google.golang.org/grpc/metadata"
 )
 
 const (
@@ -145,6 +149,33 @@ func (m *clusterMetadataManagerImpl) ListClusterMetadata(
 func (m *clusterMetadataManagerImpl) GetCurrentClusterMetadata(
 	ctx context.Context,
 ) (*GetClusterMetadataResponse, error) {
+	m.logger.Info("GetCurrentClusterMetadata called",
+		tag.NewStringTag("context_type", fmt.Sprintf("%T", ctx)),
+		tag.NewStringTag("context_pointer", fmt.Sprintf("%p", ctx)),
+		tag.NewStringTag("request_timestamp", time.Now().Format(time.RFC3339)))
+
+	// Log gRPC metadata if present
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		m.logger.Info("Incoming gRPC metadata found in GetCurrentClusterMetadata",
+			tag.NewStringTag("metadata_keys", fmt.Sprintf("%v", getMetadataKeys(md))),
+			tag.NewStringTag("metadata_values", fmt.Sprintf("%v", md)))
+	} else {
+		m.logger.Info("No incoming gRPC metadata found in GetCurrentClusterMetadata")
+	}
+
+	deadline, hasDeadline := ctx.Deadline()
+	if hasDeadline {
+		m.logger.Info("Context deadline set in GetCurrentClusterMetadata", tag.NewStringTag("deadline", deadline.Format(time.RFC3339)))
+	} else {
+		m.logger.Info("No context deadline set in GetCurrentClusterMetadata")
+	}
+
+	if err := ctx.Err(); err != nil {
+		m.logger.Info("Context error in GetCurrentClusterMetadata", tag.NewStringTag("error", err.Error()))
+	} else {
+		m.logger.Info("No context error in GetCurrentClusterMetadata")
+	}
+
 	resp, err := m.persistence.GetClusterMetadata(ctx, &InternalGetClusterMetadataRequest{ClusterName: m.currentClusterName})
 	if err != nil {
 		return nil, err
@@ -244,4 +275,13 @@ func immutableFieldsChanged(old *persistencespb.ClusterMetadata, cur *persistenc
 		}
 	}
 	return false
+}
+
+// getMetadataKeys returns a slice of keys from metadata.MD.
+func getMetadataKeys(md metadata.MD) []string {
+	keys := make([]string, 0, len(md))
+	for k := range md {
+		keys = append(keys, k)
+	}
+	return keys
 }
