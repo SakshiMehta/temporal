@@ -1987,7 +1987,7 @@ func logFromOutgoingContext(ctx context.Context, functionName string) (metadata.
 	// Call the actual FromOutgoingContext function
 	fmt.Printf("[%s] Calling metadata.FromOutgoingContext\n", functionName)
 	start := time.Now()
-	md, ok := metadata.FromOutgoingContext(ctx)
+	md, ok := metadata.FromIncomingContext(ctx)
 	duration := time.Since(start)
 	
 	fmt.Printf("[%s] FromOutgoingContext completed in %s\n", functionName, duration)
