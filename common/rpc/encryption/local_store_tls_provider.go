@@ -163,6 +163,8 @@ func (s *localStoreTlsProvider) GetFrontendClientConfig() (*tls.Config, error) {
 }
 
 func (s *localStoreTlsProvider) GetRemoteClusterClientConfig(hostname string) (*tls.Config, error) {
+	s.logger.Info("GetRemoteClusterClientConfig called in localStoreTlsProvider", tag.NewStringTag("hostname", hostname))
+
 	groupTLS, ok := s.settings.RemoteClusters[hostname]
 	if !ok {
 		return nil, nil
