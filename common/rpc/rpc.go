@@ -129,10 +129,24 @@ func (d *RPCFactory) GetFrontendClientTlsConfig() (*tls.Config, error) {
 }
 
 func (d *RPCFactory) GetRemoteClusterClientConfig(hostname string) (*tls.Config, error) {
+	d.logger.Info("GetRemoteClusterClientConfig called", tag.NewStringTag("hostname", hostname))
+
 	if d.tlsFactory != nil {
-		return d.tlsFactory.GetRemoteClusterClientConfig(hostname)
+		d.logger.Info("tlsFactory is present, delegating to tlsFactory.GetRemoteClusterClientConfig")
+		config, err := d.tlsFactory.GetRemoteClusterClientConfig(hostname)
+		if err != nil {
+			d.logger.Error("Error from tlsFactory.GetRemoteClusterClientConfig", tag.Error(err), tag.NewStringTag("hostname", hostname))
+			return nil, err
+		}
+		if config != nil {
+			d.logger.Info("tlsFactory returned a TLS config", tag.NewStringTag("serverName", config.ServerName))
+		} else {
+			d.logger.Info("tlsFactory returned nil TLS config")
+		}
+		return config, nil
 	}
 
+	d.logger.Info("No tlsFactory present, returning nil TLS config")
 	return nil, nil
 }
 

@@ -31,6 +31,8 @@ import (
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common"
 	"go.temporal.io/server/common/collection"
+	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/log/tag"
 )
 
 type tlsConfigProvider interface {
@@ -41,15 +43,18 @@ type FrontendHTTPClientCache struct {
 	metadata    Metadata
 	tlsProvider tlsConfigProvider
 	clients     *collection.FallibleOnceMap[string, *common.FrontendHTTPClient]
+	logger      log.Logger
 }
 
 func NewFrontendHTTPClientCache(
 	metadata Metadata,
 	tlsProvider tlsConfigProvider,
+	logger log.Logger,
 ) *FrontendHTTPClientCache {
 	cache := &FrontendHTTPClientCache{
 		metadata:    metadata,
 		tlsProvider: tlsProvider,
+		logger:      logger,
 	}
 	cache.clients = collection.NewFallibleOnceMap(cache.newClientForCluster)
 	metadata.RegisterMetadataChangeCallback(cache, cache.evictionCallback)
@@ -62,33 +67,49 @@ func (c *FrontendHTTPClientCache) Get(targetClusterName string) (*common.Fronten
 }
 
 func (c *FrontendHTTPClientCache) newClientForCluster(targetClusterName string) (*common.FrontendHTTPClient, error) {
+	c.logger.Info("newClientForCluster called", tag.NewStringTag("targetClusterName", targetClusterName))
+
 	targetInfo, ok := c.metadata.GetAllClusterInfo()[targetClusterName]
 	if !ok {
+		c.logger.Error("Cluster metadata not found", tag.NewStringTag("targetClusterName", targetClusterName))
 		return nil, serviceerror.NewNotFound(fmt.Sprintf("could not find cluster metadata for cluster %s", targetClusterName))
 	}
 
+	c.logger.Info("Found cluster metadata", tag.NewStringTag("targetClusterName", targetClusterName), tag.NewStringTag("httpAddress", targetInfo.HTTPAddress))
+
 	if targetInfo.HTTPAddress == "" {
+		c.logger.Error("HTTPAddress not configured for cluster", tag.NewStringTag("targetClusterName", targetClusterName))
 		return nil, serviceerror.NewInternal(fmt.Sprintf("HTTPAddress not configured for cluster: %s", targetClusterName))
 	}
-	host, _, err := net.SplitHostPort(targetInfo.HTTPAddress)
+	host, port, err := net.SplitHostPort(targetInfo.HTTPAddress)
 	if err != nil {
+		c.logger.Error("Invalid frontend address for cluster", tag.NewStringTag("targetClusterName", targetClusterName), tag.NewStringTag("httpAddress", targetInfo.HTTPAddress), tag.Error(err))
 		return nil, fmt.Errorf("%w: %w", serviceerror.NewInternal("invalid frontend address"), err)
 	}
+	c.logger.Info("SplitHostPort result", tag.NewStringTag("host", host), tag.NewStringTag("port", port))
 
 	client := http.Client{}
 
 	urlScheme := "http"
 	if c.tlsProvider != nil {
+		c.logger.Info("tlsProvider is present, attempting to get TLS config", tag.NewStringTag("host", host))
 		tlsClientConfig, err := c.tlsProvider.GetRemoteClusterClientConfig(host)
 		if err != nil {
+			c.logger.Error("Failed to get TLS config from tlsProvider", tag.NewStringTag("host", host), tag.Error(err))
 			return nil, err
 		}
 		client.Transport = &http.Transport{TLSClientConfig: tlsClientConfig}
 		if tlsClientConfig != nil {
 			urlScheme = "https"
+			c.logger.Info("TLS config found, using https scheme", tag.NewStringTag("host", host))
+		} else {
+			c.logger.Info("No TLS config found, using http scheme", tag.NewStringTag("host", host))
 		}
+	} else {
+		c.logger.Info("No tlsProvider present, using http scheme", tag.NewStringTag("host", host))
 	}
 
+	c.logger.Info("Returning FrontendHTTPClient", tag.NewStringTag("address", targetInfo.HTTPAddress), tag.NewStringTag("scheme", urlScheme))
 	return &common.FrontendHTTPClient{
 		Address: targetInfo.HTTPAddress,
 		Scheme:  urlScheme,
