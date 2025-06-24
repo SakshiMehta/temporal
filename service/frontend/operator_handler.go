@@ -28,9 +28,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"net"
-	"net/url"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -763,82 +760,6 @@ func (h *OperatorHandlerImpl) AddOrUpdateRemoteCluster(
 	h.logger.Info("AddOrUpdateRemoteCluster request details",
 		tag.NewStringTag("frontend_address", frontendAddress),
 		tag.NewStringTag("request_type", "operator_request_details"))
-
-	// Handle passthrough address
-	if u, err := url.Parse(frontendAddress); err == nil && u.Scheme == "passthrough" {
-		h.logger.Info("Processing passthrough address in operator handler",
-			tag.NewStringTag("original_address", frontendAddress),
-			tag.NewStringTag("scheme", u.Scheme),
-			tag.NewStringTag("path", u.Path),
-			tag.NewStringTag("host", u.Host),
-			tag.NewStringTag("request_type", "operator_passthrough_parsing"))
-		// Extract the actual address from the passthrough URI and maintain the passthrough scheme
-		target := strings.TrimPrefix(u.Path, "/")
-		frontendAddress = "passthrough:///" + target
-		h.logger.Info("Converted passthrough address in operator handler",
-			tag.NewStringTag("new_address", frontendAddress),
-			tag.NewStringTag("target", target),
-			tag.NewStringTag("request_type", "operator_passthrough_conversion"))
-	}
-
-	// Add DNS resolution logging for the frontend address
-	h.logger.Info("Attempting DNS resolution for frontend address in operator handler",
-		tag.NewStringTag("frontend_address", frontendAddress),
-		tag.NewStringTag("request_type", "operator_dns_resolution"))
-
-	// Try to extract host and port for DNS resolution
-	if host, port, err := net.SplitHostPort(frontendAddress); err == nil {
-		h.logger.Info("Parsed host:port for DNS resolution in operator handler",
-			tag.NewStringTag("host", host),
-			tag.NewStringTag("port", port),
-			tag.NewStringTag("frontend_address", frontendAddress),
-			tag.NewStringTag("request_type", "operator_host_port_parsing"))
-
-		// Attempt DNS resolution
-		if ips, err := net.LookupHost(host); err == nil {
-			h.logger.Info("DNS resolution successful in operator handler",
-				tag.NewStringTag("host", host),
-				tag.NewStringTag("resolved_ips", strings.Join(ips, ",")),
-				tag.NewStringTag("ip_count", fmt.Sprintf("%d", len(ips))),
-				tag.NewStringTag("frontend_address", frontendAddress),
-				tag.NewStringTag("request_type", "operator_dns_success"))
-
-			// Log each resolved IP with detailed information
-			for i, ip := range ips {
-				h.logger.Info("Resolved IP details in operator handler",
-					tag.NewStringTag("ip_index", fmt.Sprintf("%d", i)),
-					tag.NewStringTag("ip", ip),
-					tag.NewStringTag("host", host),
-					tag.NewStringTag("port", port),
-					tag.NewStringTag("frontend_address", frontendAddress),
-					tag.NewStringTag("request_type", "operator_ip_details"))
-
-				// Get IP characteristics
-				if parsedIP := net.ParseIP(ip); parsedIP != nil {
-					h.logger.Info("IP characteristics in operator handler",
-						tag.NewStringTag("ip", ip),
-						tag.NewStringTag("is_loopback", fmt.Sprintf("%t", parsedIP.IsLoopback())),
-						tag.NewStringTag("is_private", fmt.Sprintf("%t", parsedIP.IsPrivate())),
-						tag.NewStringTag("is_global_unicast", fmt.Sprintf("%t", parsedIP.IsGlobalUnicast())),
-						tag.NewStringTag("host", host),
-						tag.NewStringTag("frontend_address", frontendAddress),
-						tag.NewStringTag("request_type", "operator_ip_characteristics"))
-				}
-			}
-		} else {
-			h.logger.Error("DNS resolution failed in operator handler",
-				tag.Error(err),
-				tag.NewStringTag("host", host),
-				tag.NewStringTag("frontend_address", frontendAddress),
-				tag.NewStringTag("request_type", "operator_dns_failure"))
-			// Don't return error here, as the connection might still work
-		}
-	} else {
-		h.logger.Warn("Could not parse host:port for DNS resolution in operator handler",
-			tag.Error(err),
-			tag.NewStringTag("frontend_address", frontendAddress),
-			tag.NewStringTag("request_type", "operator_host_port_parsing_failure"))
-	}
 
 	h.logger.Info("Creating remote admin client in operator handler",
 		tag.NewStringTag("frontend_address", frontendAddress),
