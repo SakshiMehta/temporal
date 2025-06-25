@@ -28,15 +28,19 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/headers"
 	"go.temporal.io/server/common/log"
 	"go.temporal.io/server/common/log/tag"
+	"go.temporal.io/server/common/metrics"
 	"go.temporal.io/server/common/persistence/serialization"
+	"go.temporal.io/server/common/rpc/interceptor"
 	serviceerrors "go.temporal.io/server/common/serviceerror"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -80,114 +84,79 @@ const (
 // The hostName syntax is defined in
 // https://github.com/grpc/grpc/blob/master/doc/naming.md.
 // dns resolver is used by default
-// func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
-// 	logger.Info("Starting gRPC Dial",
-// 		tag.NewStringTag("hostName", hostName),
-// 		tag.NewBoolTag("tls_enabled", tlsConfig != nil))
-
-// 	newHost := "passthrough:" + hostName
-// 	logger.Info("Normalized passthrough address", tag.NewStringTag("original_hostName", hostName), tag.NewStringTag("new_hostName", newHost))
-// 	hostName = newHost
-
-// 	var grpcSecureOpt grpc.DialOption
-// 	if tlsConfig == nil {
-// 		logger.Info("Dial: Using insecure credentials (no TLS)", tag.NewStringTag("hostName", hostName))
-// 		grpcSecureOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
-// 	} else {
-// 		logger.Info("Dial: Using TLS credentials",
-// 			tag.NewStringTag("serverName", tlsConfig.ServerName),
-// 			tag.NewStringTag("min_version", fmt.Sprintf("%d", tlsConfig.MinVersion)),
-// 			tag.NewStringTag("max_version", fmt.Sprintf("%d", tlsConfig.MaxVersion)),
-// 			tag.NewBoolTag("insecure_skip_verify", tlsConfig.InsecureSkipVerify),
-// 			tag.NewStringTag("cert_count", fmt.Sprintf("%d", len(tlsConfig.Certificates))),
-// 			tag.NewStringTag("root_ca_count", func() string {
-// 				if tlsConfig.RootCAs != nil {
-// 					return fmt.Sprintf("%d", len(tlsConfig.RootCAs.Subjects()))
-// 				}
-// 				return "0"
-// 			}()))
-// 		grpcSecureOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
-// 	}
-
-// 	logger.Info("Dial: Preparing dial options",
-// 		tag.NewInt("num_options", len(opts)+8)) // 8 default options
-
-// 	// gRPC maintains connection pool inside grpc.ClientConn.
-// 	// This connection pool has auto reconnect feature.
-// 	// If connection goes down, gRPC will try to reconnect using exponential backoff strategy:
-// 	// https://github.com/grpc/grpc/blob/master/doc/connection-backoff.md.
-// 	// Default MaxDelay is 120 seconds which is too high.
-// 	var cp = grpc.ConnectParams{
-// 		Backoff:           backoff.DefaultConfig,
-// 		MinConnectTimeout: minConnectTimeout,
-// 	}
-// 	cp.Backoff.MaxDelay = MaxBackoffDelay
-
-// 	dialOptions := []grpc.DialOption{
-// 		grpcSecureOpt,
-// 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxInternodeRecvPayloadSize)),
-// 		grpc.WithChainUnaryInterceptor(
-// 			headersInterceptor,
-// 			metrics.NewClientMetricsTrailerPropagatorInterceptor(logger),
-// 			errorInterceptor,
-// 		),
-// 		grpc.WithChainStreamInterceptor(
-// 			interceptor.StreamErrorInterceptor,
-// 		),
-// 		grpc.WithDefaultServiceConfig(DefaultServiceConfig),
-// 		grpc.WithDisableServiceConfig(),
-// 		grpc.WithConnectParams(cp),
-// 	}
-// 	dialOptions = append(dialOptions, opts...)
-
-// 	logger.Info("Dial: Initiating grpc.NewClient",
-// 		tag.NewStringTag("hostName", hostName),
-// 		tag.NewInt("total_dial_options", len(dialOptions)))
-
-// 	conn, err := grpc.NewClient(hostName, dialOptions...)
-// 	if err != nil {
-// 		logger.Error("Dial: Failed to create gRPC connection", tag.NewStringTag("hostName", hostName), tag.Error(err))
-// 		return nil, err
-// 	}
-// 	logger.Info("Dial: Successfully created gRPC connection",
-// 		tag.NewStringTag("hostName", hostName),
-// 		tag.NewStringTag("connection_state", conn.GetState().String()))
-// 	return conn, nil
-// }
-// func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
-
 func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
-	logger.Info("Dialing gRPC endpoint",
+	logger.Info("Starting gRPC Dial",
 		tag.NewStringTag("hostName", hostName),
 		tag.NewBoolTag("tls_enabled", tlsConfig != nil))
 
-	frontendAddress := hostName
+	newHost := "passthrough:" + hostName
+	logger.Info("Normalized passthrough address", tag.NewStringTag("original_hostName", hostName), tag.NewStringTag("new_hostName", newHost))
+	hostName = newHost
 
-	var grpcSecurityOptions grpc.DialOption
-	if tlsConfig != nil {
-		logger.Info("Dial: Using TLS credentials.")
-		grpcSecurityOptions = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
+	var grpcSecureOpt grpc.DialOption
+	if tlsConfig == nil {
+		logger.Info("Dial: Using insecure credentials (no TLS)", tag.NewStringTag("hostName", hostName))
+		grpcSecureOpt = grpc.WithTransportCredentials(insecure.NewCredentials())
 	} else {
-		logger.Info("Dial: Using insecure credentials (no TLS).")
-		grpcSecurityOptions = grpc.WithTransportCredentials(insecure.NewCredentials())
+		logger.Info("Dial: Using TLS credentials",
+			tag.NewStringTag("serverName", tlsConfig.ServerName),
+			tag.NewStringTag("min_version", fmt.Sprintf("%d", tlsConfig.MinVersion)),
+			tag.NewStringTag("max_version", fmt.Sprintf("%d", tlsConfig.MaxVersion)),
+			tag.NewBoolTag("insecure_skip_verify", tlsConfig.InsecureSkipVerify),
+			tag.NewStringTag("cert_count", fmt.Sprintf("%d", len(tlsConfig.Certificates))),
+			tag.NewStringTag("root_ca_count", func() string {
+				if tlsConfig.RootCAs != nil {
+					return fmt.Sprintf("%d", len(tlsConfig.RootCAs.Subjects()))
+				}
+				return "0"
+			}()))
+		grpcSecureOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
 
-	dialOpts := []grpc.DialOption{
-		grpcSecurityOptions,
-	}
-	dialOpts = append(dialOpts, opts...)
+	logger.Info("Dial: Preparing dial options",
+		tag.NewInt("num_options", len(opts)+8)) // 8 default options
 
-	connection, err := grpc.NewClient(frontendAddress, dialOpts...)
+	// gRPC maintains connection pool inside grpc.ClientConn.
+	// This connection pool has auto reconnect feature.
+	// If connection goes down, gRPC will try to reconnect using exponential backoff strategy:
+	// https://github.com/grpc/grpc/blob/master/doc/connection-backoff.md.
+	// Default MaxDelay is 120 seconds which is too high.
+	var cp = grpc.ConnectParams{
+		Backoff:           backoff.DefaultConfig,
+		MinConnectTimeout: minConnectTimeout,
+	}
+	cp.Backoff.MaxDelay = MaxBackoffDelay
+
+	dialOptions := []grpc.DialOption{
+		grpcSecureOpt,
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxInternodeRecvPayloadSize)),
+		grpc.WithChainUnaryInterceptor(
+			headersInterceptor,
+			metrics.NewClientMetricsTrailerPropagatorInterceptor(logger),
+			errorInterceptor,
+		),
+		grpc.WithChainStreamInterceptor(
+			interceptor.StreamErrorInterceptor,
+		),
+		grpc.WithDefaultServiceConfig(DefaultServiceConfig),
+		grpc.WithDisableServiceConfig(),
+		grpc.WithConnectParams(cp),
+	}
+	dialOptions = append(dialOptions, opts...)
+
+	logger.Info("Dial: Initiating grpc.NewClient",
+		tag.NewStringTag("hostName", hostName),
+		tag.NewInt("total_dial_options", len(dialOptions)))
+
+	conn, err := grpc.NewClient(hostName, dialOptions...)
 	if err != nil {
-		logger.Error("Failed to create gRPC connection", tag.Error(err), tag.NewStringTag("address", frontendAddress))
+		logger.Error("Dial: Failed to create gRPC connection", tag.NewStringTag("hostName", hostName), tag.Error(err))
 		return nil, err
 	}
-
-	logger.Info("Successfully created gRPC connection",
-		tag.NewStringTag("address", frontendAddress),
-		tag.NewStringTag("connection_state", connection.GetState().String()),
-	)
-	return connection, nil
+	logger.Info("Dial: Successfully created gRPC connection",
+		tag.NewStringTag("hostName", hostName),
+		tag.NewStringTag("connection_state", conn.GetState().String()))
+	return conn, nil
 }
 
 func errorInterceptor(
