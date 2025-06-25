@@ -29,15 +29,12 @@
 package adminservice
 
 import (
-	"context"
-	"fmt"
-	"reflect"
-	"time"
+	context "context"
+	log "log"
 
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
-	"google.golang.org/grpc/metadata"
 )
 
 // This is a compile-time assertion to ensure that this generated file
@@ -343,86 +340,14 @@ func (c *adminServiceClient) GetSearchAttributes(ctx context.Context, in *GetSea
 }
 
 func (c *adminServiceClient) DescribeCluster(ctx context.Context, in *DescribeClusterRequest, opts ...grpc.CallOption) (*DescribeClusterResponse, error) {
-	start := time.Now()
-	
-	// Log the start of the call using fmt.Printf for simplicity since this is auto-generated code
-	fmt.Printf("[DescribeCluster] Starting gRPC call at %s\n", start.Format(time.RFC3339))
-	
-	// Log context details
-	md, ok := logFromOutgoingContext(ctx, "DescribeCluster")
-	if ok {
-		keys := make([]string, 0, len(md))
-		for k := range md {
-			keys = append(keys, k)
-		}
-		fmt.Printf("[DescribeCluster] Outgoing metadata: %v\n", keys)
-		
-		// Log detailed metadata values
-		fmt.Printf("[DescribeCluster] Detailed metadata values:\n")
-		for k, v := range md {
-			fmt.Printf("[DescribeCluster]   %s: %v\n", k, v)
-		}
-	} else {
-		fmt.Printf("[DescribeCluster] No outgoing metadata found\n")
-	}
-	
-	// Log request details
-	if in != nil {
-		fmt.Printf("[DescribeCluster] Request cluster name: %s\n", in.GetClusterName())
-		
-		// Log detailed request object
-		fmt.Printf("[DescribeCluster] Detailed request object:\n")
-		fmt.Printf("[DescribeCluster]   Request type: %T\n", in)
-		fmt.Printf("[DescribeCluster]   Request pointer: %p\n", in)
-		fmt.Printf("[DescribeCluster]   Cluster name: %q\n", in.GetClusterName())
-		
-		// Use reflection to show all fields if available
-		if reflect.ValueOf(in).Elem().IsValid() {
-			fmt.Printf("[DescribeCluster]   Request struct is valid\n")
-		} else {
-			fmt.Printf("[DescribeCluster]   Request struct is invalid\n")
-		}
-	} else {
-		fmt.Printf("[DescribeCluster] WARNING: Request is nil\n")
-	}
-	
-	// Log call options
-	fmt.Printf("[DescribeCluster] Call options count: %d\n", len(opts))
-	
+	log.Printf("DescribeCluster called with input: %+v", in)
 	out := new(DescribeClusterResponse)
-	
-	// Log before invoking the gRPC call
-	fmt.Printf("[DescribeCluster] Invoking gRPC call: %s\n", AdminService_DescribeCluster_FullMethodName)
-	
-	invokeStart := time.Now()
 	err := c.cc.Invoke(ctx, AdminService_DescribeCluster_FullMethodName, in, out, opts...)
-	invokeDuration := time.Since(invokeStart)
-	
-	// Log the result
 	if err != nil {
-		fmt.Printf("[DescribeCluster] gRPC call FAILED after %s (total: %s)\n", invokeDuration, time.Since(start))
-		fmt.Printf("[DescribeCluster] Error type: %T\n", err)
-		fmt.Printf("[DescribeCluster] Error details: %v\n", err)
-		
-		// Log gRPC status details if available
-		if st, ok := status.FromError(err); ok {
-			fmt.Printf("[DescribeCluster] gRPC status - Code: %s, Message: %s, Details: %v\n", 
-				st.Code().String(), st.Message(), st.Details())
-		}
-		
+		log.Printf("DescribeCluster error: %v", err)
 		return nil, err
 	}
-	
-	fmt.Printf("[DescribeCluster] gRPC call SUCCEEDED after %s (total: %s)\n", invokeDuration, time.Since(start))
-	
-	// Log response details if available
-	if out != nil {
-		fmt.Printf("[DescribeCluster] Response - Cluster: %s, ID: %s, Shards: %d\n", 
-			out.GetClusterName(), out.GetClusterId(), out.GetHistoryShardCount())
-	}
-	
-	fmt.Printf("[DescribeCluster] Completed gRPC call in %s\n", time.Since(start))
-	
+	log.Printf("DescribeCluster response: %+v", out)
 	return out, nil
 }
 
@@ -445,87 +370,11 @@ func (c *adminServiceClient) ListClusterMembers(ctx context.Context, in *ListClu
 }
 
 func (c *adminServiceClient) AddOrUpdateRemoteCluster(ctx context.Context, in *AddOrUpdateRemoteClusterRequest, opts ...grpc.CallOption) (*AddOrUpdateRemoteClusterResponse, error) {
-	start := time.Now()
-	
-	// Log the start of the call using fmt.Printf for simplicity since this is auto-generated code
-	fmt.Printf("[AddOrUpdateRemoteCluster] Starting gRPC call at %s\n", start.Format(time.RFC3339))
-	
-	// Log context details
-	md, ok := logFromOutgoingContext(ctx, "AddOrUpdateRemoteCluster")
-	if ok {
-		keys := make([]string, 0, len(md))
-		for k := range md {
-			keys = append(keys, k)
-		}
-		fmt.Printf("[AddOrUpdateRemoteCluster] Outgoing metadata: %v\n", keys)
-		
-		// Log detailed metadata values
-		fmt.Printf("[AddOrUpdateRemoteCluster] Detailed metadata values:\n")
-		for k, v := range md {
-			fmt.Printf("[AddOrUpdateRemoteCluster]   %s: %v\n", k, v)
-		}
-	} else {
-		fmt.Printf("[AddOrUpdateRemoteCluster] No outgoing metadata found\n")
-	}
-	
-	// Log request details
-	if in != nil {
-		fmt.Printf("[AddOrUpdateRemoteCluster] Request frontend address: %s\n", in.GetFrontendAddress())
-		fmt.Printf("[AddOrUpdateRemoteCluster] Request enable connection: %t\n", in.GetEnableRemoteClusterConnection())
-		
-		// Log detailed request object
-		fmt.Printf("[AddOrUpdateRemoteCluster] Detailed request object:\n")
-		fmt.Printf("[AddOrUpdateRemoteCluster]   Request type: %T\n", in)
-		fmt.Printf("[AddOrUpdateRemoteCluster]   Request pointer: %p\n", in)
-		fmt.Printf("[AddOrUpdateRemoteCluster]   Frontend address: %q\n", in.GetFrontendAddress())
-		fmt.Printf("[AddOrUpdateRemoteCluster]   Enable connection: %t\n", in.GetEnableRemoteClusterConnection())
-		
-		// Use reflection to show all fields if available
-		if reflect.ValueOf(in).Elem().IsValid() {
-			fmt.Printf("[AddOrUpdateRemoteCluster]   Request struct is valid\n")
-		} else {
-			fmt.Printf("[AddOrUpdateRemoteCluster]   Request struct is invalid\n")
-		}
-	} else {
-		fmt.Printf("[AddOrUpdateRemoteCluster] WARNING: Request is nil\n")
-	}
-	
-	// Log call options
-	fmt.Printf("[AddOrUpdateRemoteCluster] Call options count: %d\n", len(opts))
-	
 	out := new(AddOrUpdateRemoteClusterResponse)
-	
-	// Log before invoking the gRPC call
-	fmt.Printf("[AddOrUpdateRemoteCluster] Invoking gRPC call: %s\n", AdminService_AddOrUpdateRemoteCluster_FullMethodName)
-	
-	invokeStart := time.Now()
 	err := c.cc.Invoke(ctx, AdminService_AddOrUpdateRemoteCluster_FullMethodName, in, out, opts...)
-	invokeDuration := time.Since(invokeStart)
-	
-	// Log the result
 	if err != nil {
-		fmt.Printf("[AddOrUpdateRemoteCluster] gRPC call FAILED after %s (total: %s)\n", invokeDuration, time.Since(start))
-		fmt.Printf("[AddOrUpdateRemoteCluster] Error type: %T\n", err)
-		fmt.Printf("[AddOrUpdateRemoteCluster] Error details: %v\n", err)
-		
-		// Log gRPC status details if available
-		if st, ok := status.FromError(err); ok {
-			fmt.Printf("[AddOrUpdateRemoteCluster] gRPC status - Code: %s, Message: %s, Details: %v\n", 
-				st.Code().String(), st.Message(), st.Details())
-		}
-		
 		return nil, err
 	}
-	
-	fmt.Printf("[AddOrUpdateRemoteCluster] gRPC call SUCCEEDED after %s (total: %s)\n", invokeDuration, time.Since(start))
-	
-	// Log response details if available
-	if out != nil {
-		fmt.Printf("[AddOrUpdateRemoteCluster] Response received successfully\n")
-	}
-	
-	fmt.Printf("[AddOrUpdateRemoteCluster] Completed gRPC call in %s\n", time.Since(start))
-	
 	return out, nil
 }
 
@@ -1953,56 +1802,4 @@ var AdminService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Metadata: "temporal/server/api/adminservice/v1/service.proto",
-}
-
-// logFromOutgoingContext is a wrapper around metadata.FromOutgoingContext that adds detailed logging
-func logFromOutgoingContext(ctx context.Context, functionName string) (metadata.MD, bool) {
-	fmt.Printf("[%s] Starting FromOutgoingContext wrapper\n", functionName)
-	
-	// Log context details
-	fmt.Printf("[%s] Context type: %T\n", functionName, ctx)
-	fmt.Printf("[%s] Context pointer: %p\n", functionName, ctx)
-	
-	// Check if context is nil
-	if ctx == nil {
-		fmt.Printf("[%s] WARNING: Context is nil\n", functionName)
-		return nil, false
-	}
-	
-	// Log context deadline if available
-	if deadline, ok := ctx.Deadline(); ok {
-		fmt.Printf("[%s] Context has deadline: %s\n", functionName, deadline.Format(time.RFC3339))
-	} else {
-		fmt.Printf("[%s] Context has no deadline\n", functionName)
-	}
-	
-	// Log context done status
-	select {
-	case <-ctx.Done():
-		fmt.Printf("[%s] Context is done/cancelled\n", functionName)
-	default:
-		fmt.Printf("[%s] Context is not done\n", functionName)
-	}
-	
-	// Call the actual FromOutgoingContext function
-	fmt.Printf("[%s] Calling metadata.FromOutgoingContext\n", functionName)
-	start := time.Now()
-	md, ok := metadata.FromOutgoingContext(ctx)
-	duration := time.Since(start)
-	
-	fmt.Printf("[%s] FromOutgoingContext completed in %s\n", functionName, duration)
-	fmt.Printf("[%s] FromOutgoingContext result - ok: %t\n", functionName, ok)
-	
-	if ok {
-		fmt.Printf("[%s] Metadata found with %d keys\n", functionName, len(md))
-		// Log each metadata key-value pair
-		for k, v := range md {
-			fmt.Printf("[%s]   Metadata key: %q, values: %v\n", functionName, k, v)
-		}
-	} else {
-		fmt.Printf("[%s] No metadata found in context\n", functionName)
-	}
-	
-	fmt.Printf("[%s] FromOutgoingContext wrapper completed\n", functionName)
-	return md, ok
 }
