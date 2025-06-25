@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -129,7 +130,7 @@ func (d *RPCFactory) GetFrontendClientTlsConfig() (*tls.Config, error) {
 }
 
 func (d *RPCFactory) GetRemoteClusterClientConfig(hostname string) (*tls.Config, error) {
-	d.logger.Info("GetRemoteClusterClientConfig called", tag.NewStringTag("hostname", hostname))
+	d.logger.Info("GetRemoteClusterClientConfig called in RPCFactory", tag.NewStringTag("hostname", hostname))
 
 	if d.tlsFactory != nil {
 		d.logger.Info("tlsFactory is present, delegating to tlsFactory.GetRemoteClusterClientConfig")
@@ -224,22 +225,34 @@ func (d *RPCFactory) CreateRemoteFrontendGRPCConnection(rpcAddress string) *grpc
 		tag.Address(rpcAddress),
 		tag.NewStringTag("connection_type", "remote_frontend"))
 
-	var tlsClientConfig *tls.Config
+	// Determine the actual address to connect to and the hostname for TLS config
+	target := rpcAddress
+	hostname := ""
 	var err error
-	if d.tlsFactory != nil {
-		hostname, _, err2 := net.SplitHostPort(rpcAddress)
-		if err2 != nil {
-			d.logger.Error("Invalid rpcAddress for remote cluster", tag.Error(err2), tag.Address(rpcAddress))
-			d.logger.Fatal("Invalid rpcAddress for remote cluster", tag.Error(err2))
+
+	if strings.HasPrefix(rpcAddress, "passthrough:") {
+		target = strings.TrimPrefix(rpcAddress, "passthrough:")
+		hostname, _, err = net.SplitHostPort(target)
+		if err != nil {
+			d.logger.Warn("Failed to split host and port after stripping passthrough prefix, using 'passthrough' as hostname", tag.Error(err), tag.Address(target))
+			hostname = "passthrough"
 		}
+	} else {
+		hostname, _, err = net.SplitHostPort(target)
+		if err != nil {
+			d.logger.Fatal("Invalid rpcAddress for remote cluster. Unable to extract host:port", tag.Error(err), tag.Address(target))
+		}
+	}
+
+	// Prepare TLS config if needed
+	var tlsClientConfig *tls.Config
+	if d.tlsFactory != nil {
 		d.logger.Info("Extracted hostname for TLS config",
 			tag.NewStringTag("hostname", hostname),
-			tag.Address(rpcAddress))
+			tag.Address(target))
 		tlsClientConfig, err = d.tlsFactory.GetRemoteClusterClientConfig(hostname)
-
 		if err != nil {
-			d.logger.Error("Failed to create tls config for gRPC connection", tag.Error(err), tag.NewStringTag("hostname", hostname), tag.Address(rpcAddress))
-			d.logger.Fatal("Failed to create tls config for gRPC connection", tag.Error(err))
+			d.logger.Fatal("Failed to create tls config for gRPC connection", tag.Error(err), tag.NewStringTag("hostname", hostname), tag.Address(target))
 			return nil
 		}
 		if tlsClientConfig != nil {
@@ -255,21 +268,22 @@ func (d *RPCFactory) CreateRemoteFrontendGRPCConnection(rpcAddress string) *grpc
 					}
 					return "0"
 				}()),
-				tag.Address(rpcAddress))
+				tag.Address(target))
 		} else {
-			d.logger.Info("No TLS config, using insecure connection", tag.Address(rpcAddress))
+			d.logger.Info("No TLS config, using insecure connection", tag.Address(target))
 		}
 	}
 
-	connection := d.dial(rpcAddress, tlsClientConfig)
-	if connection != nil {
+	// Establish the gRPC connection
+	conn := d.dial(target, tlsClientConfig)
+	if conn != nil {
 		d.logger.Info("Successfully created gRPC connection",
-			tag.Address(rpcAddress),
-			tag.NewStringTag("connection_state", connection.GetState().String()))
+			tag.Address(target),
+			tag.NewStringTag("connection_state", conn.GetState().String()))
 	} else {
-		d.logger.Error("Failed to create gRPC connection", tag.Address(rpcAddress))
+		d.logger.Error("Failed to create gRPC connection", tag.Address(target))
 	}
-	return connection
+	return conn
 }
 
 // CreateLocalFrontendGRPCConnection creates connection for internal frontend calls
