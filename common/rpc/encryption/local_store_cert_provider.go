@@ -116,71 +116,79 @@ func (s *localStoreCertProvider) Close() {
 }
 
 func (s *localStoreCertProvider) FetchServerCertificate() (*tls.Certificate, error) {
-
 	if s.tlsSettings == nil {
+		s.logger.Info("FetchServerCertificate: tlsSettings is nil")
 		return nil, nil
 	}
 	certs, err := s.getCerts()
 	if err != nil {
+		s.logger.Error("FetchServerCertificate: error getting certs", tag.Error(err))
 		return nil, err
 	}
+	s.logger.Info("FetchServerCertificate: returning server cert")
 	return certs.serverCert, nil
 }
 
 func (s *localStoreCertProvider) FetchClientCAs() (*x509.CertPool, error) {
-
 	if s.tlsSettings == nil {
+		s.logger.Info("FetchClientCAs: tlsSettings is nil")
 		return nil, nil
 	}
 	certs, err := s.getCerts()
 	if err != nil {
+		s.logger.Error("FetchClientCAs: error getting certs", tag.Error(err))
 		return nil, err
 	}
+	s.logger.Info("FetchClientCAs: returning client CA pool")
 	return certs.clientCAPool, nil
 }
 
 func (s *localStoreCertProvider) FetchServerRootCAsForClient(isWorker bool) (*x509.CertPool, error) {
-
 	clientSettings := s.getClientTLSSettings(isWorker)
 	if clientSettings == nil {
+		s.logger.Info(fmt.Sprintf("FetchServerRootCAsForClient: clientSettings is nil, isWorker=%v", isWorker))
 		return nil, nil
 	}
 	certs, err := s.getCerts()
 	if err != nil {
+		s.logger.Error("FetchServerRootCAsForClient: error getting certs", tag.Error(err))
 		return nil, err
 	}
-
 	if isWorker {
+		s.logger.Info("FetchServerRootCAsForClient: returning serverCAsWorkerPool")
 		return certs.serverCAsWorkerPool, nil
 	}
-
+	s.logger.Info("FetchServerRootCAsForClient: returning serverCAPool")
 	return certs.serverCAPool, nil
 }
 
 func (s *localStoreCertProvider) FetchClientCertificate(isWorker bool) (*tls.Certificate, error) {
-
 	if !s.isTLSEnabled() {
+		s.logger.Info("FetchClientCertificate: TLS not enabled")
 		return nil, nil
 	}
 	certs, err := s.getCerts()
 	if err != nil {
+		s.logger.Error("FetchClientCertificate: error getting certs", tag.Error(err))
 		return nil, err
 	}
 	if isWorker {
+		s.logger.Info("FetchClientCertificate: returning worker cert")
 		return certs.workerCert, nil
 	}
+	s.logger.Info("FetchClientCertificate: returning server cert")
 	return certs.serverCert, nil
 }
 
-func (s *localStoreCertProvider) GetExpiringCerts(timeWindow time.Duration,
-) (CertExpirationMap, CertExpirationMap, error) {
-
+func (s *localStoreCertProvider) GetExpiringCerts(timeWindow time.Duration) (CertExpirationMap, CertExpirationMap, error) {
+	s.logger.Info("GetExpiringCerts called", tag.NewDurationTag("timeWindow", timeWindow))
 	expiring := make(CertExpirationMap)
 	expired := make(CertExpirationMap)
 	when := time.Now().UTC().Add(timeWindow)
 
 	certs, err := s.getCerts()
 	if err != nil {
+		s.logger.Error("GetExpiringCerts: error getting certs", tag.Error(err))
 		return nil, nil, err
 	}
 
@@ -188,19 +196,21 @@ func (s *localStoreCertProvider) GetExpiringCerts(timeWindow time.Duration,
 	err = appendError(err, checkError)
 	checkError = checkTLSCertForExpiration(certs.workerCert, when, expiring, expired)
 	err = appendError(err, checkError)
-
 	checkCertsForExpiration(certs.clientCACerts, when, expiring, expired)
 	checkCertsForExpiration(certs.serverCACerts, when, expiring, expired)
 	checkCertsForExpiration(certs.serverCACertsWorker, when, expiring, expired)
 
+	if err != nil {
+		s.logger.Error("GetExpiringCerts: error checking expiration", tag.Error(err))
+	}
 	return expiring, expired, err
 }
 
 func (s *localStoreCertProvider) getCerts() (*certCache, error) {
-
 	s.RLock()
 	if s.certs != nil {
 		defer s.RUnlock()
+		s.logger.Info("getCerts: returning cached certs")
 		return s.certs, nil
 	}
 	s.RUnlock()
@@ -208,25 +218,29 @@ func (s *localStoreCertProvider) getCerts() (*certCache, error) {
 	defer s.Unlock()
 
 	if s.certs != nil {
+		s.logger.Info("getCerts: returning cached certs (after lock)")
 		return s.certs, nil
 	}
 
 	newCerts, err := s.loadCerts()
 	if err != nil {
+		s.logger.Error("getCerts: error loading certs", tag.Error(err))
 		return nil, err
 	}
 
 	if newCerts == nil {
+		s.logger.Info("getCerts: loaded certs is nil, setting empty certCache")
 		s.certs = &certCache{}
 	} else {
+		s.logger.Info("getCerts: loaded new certs")
 		s.certs = newCerts
 	}
 	return s.certs, nil
 }
 
 func (s *localStoreCertProvider) loadCerts() (*certCache, error) {
-
 	if !s.isTLSEnabled() {
+		s.logger.Info("loadCerts: TLS not enabled")
 		return nil, nil
 	}
 
@@ -234,15 +248,18 @@ func (s *localStoreCertProvider) loadCerts() (*certCache, error) {
 	var err error
 
 	if s.tlsSettings != nil {
+		s.logger.Info("loadCerts: loading server cert")
 		newCerts.serverCert, err = s.fetchCertificate(s.tlsSettings.Server.CertFile, s.tlsSettings.Server.CertData,
 			s.tlsSettings.Server.KeyFile, s.tlsSettings.Server.KeyData)
 		if err != nil {
+			s.logger.Error("loadCerts: error loading server cert", tag.Error(err))
 			return nil, err
 		}
 
 		certPool, certs, err := s.fetchCAs(s.tlsSettings.Server.ClientCAFiles, s.tlsSettings.Server.ClientCAData,
 			"cannot specify both clientCAFiles and clientCAData properties")
 		if err != nil {
+			s.logger.Error("loadCerts: error loading client CAs", tag.Error(err))
 			return nil, err
 		}
 		newCerts.clientCAPool = certPool
@@ -253,9 +270,11 @@ func (s *localStoreCertProvider) loadCerts() (*certCache, error) {
 		newCerts.workerCert = newCerts.serverCert
 	} else {
 		if s.workerTLSSettings != nil {
+			s.logger.Info("loadCerts: loading worker cert")
 			newCerts.workerCert, err = s.fetchCertificate(s.workerTLSSettings.CertFile, s.workerTLSSettings.CertData,
 				s.workerTLSSettings.KeyFile, s.workerTLSSettings.KeyData)
 			if err != nil {
+				s.logger.Error("loadCerts: error loading worker cert", tag.Error(err))
 				return nil, err
 			}
 		}
@@ -263,6 +282,7 @@ func (s *localStoreCertProvider) loadCerts() (*certCache, error) {
 
 	nonWorkerPool, nonWorkerCerts, err := s.loadServerCACerts(false)
 	if err != nil {
+		s.logger.Error("loadCerts: error loading non-worker server CAs", tag.Error(err))
 		return nil, err
 	}
 	newCerts.serverCAPool = nonWorkerPool
@@ -270,22 +290,24 @@ func (s *localStoreCertProvider) loadCerts() (*certCache, error) {
 
 	workerPool, workerCerts, err := s.loadServerCACerts(true)
 	if err != nil {
+		s.logger.Error("loadCerts: error loading worker server CAs", tag.Error(err))
 		return nil, err
 	}
 	newCerts.serverCAsWorkerPool = workerPool
 	newCerts.serverCACertsWorker = workerCerts
 
+	s.logger.Info("loadCerts: finished loading all certs")
 	return &newCerts, nil
 }
 
-func (s *localStoreCertProvider) fetchCertificate(
-	certFile string, certData string,
-	keyFile string, keyData string) (*tls.Certificate, error) {
+func (s *localStoreCertProvider) fetchCertificate(certFile string, certData string, keyFile string, keyData string) (*tls.Certificate, error) {
 	if certFile == "" && certData == "" {
+		s.logger.Info("fetchCertificate: no certFile or certData provided")
 		return nil, nil
 	}
 
 	if certFile != "" && certData != "" {
+		s.logger.Error("fetchCertificate: both certFile and certData provided")
 		return nil, errors.New("only one of certFile or certData properties should be spcified")
 	}
 
@@ -294,36 +316,44 @@ func (s *localStoreCertProvider) fetchCertificate(
 	var err error
 
 	if certFile != "" {
-		s.logger.Info("loading certificate from file", tag.TLSCertFile(certFile))
+		s.logger.Info("fetchCertificate: loading certificate from file", tag.TLSCertFile(certFile))
 		certBytes, err = os.ReadFile(certFile)
 		if err != nil {
+			s.logger.Error("fetchCertificate: error reading cert file", tag.Error(err), tag.TLSCertFile(certFile))
 			return nil, err
 		}
 	} else if certData != "" {
+		s.logger.Info("fetchCertificate: decoding certificate from data")
 		certBytes, err = base64.StdEncoding.DecodeString(certData)
 		if err != nil {
+			s.logger.Error("fetchCertificate: error decoding cert data", tag.Error(err))
 			return nil, fmt.Errorf("TLS public certificate could not be decoded: %w", err)
 		}
 	}
 
 	if keyFile != "" {
-		s.logger.Info("loading private key from file", tag.TLSKeyFile(keyFile))
+		s.logger.Info("fetchCertificate: loading private key from file", tag.TLSKeyFile(keyFile))
 		keyBytes, err = os.ReadFile(keyFile)
 		if err != nil {
+			s.logger.Error("fetchCertificate: error reading key file", tag.Error(err), tag.TLSKeyFile(keyFile))
 			return nil, err
 		}
 	} else if keyData != "" {
+		s.logger.Info("fetchCertificate: decoding private key from data")
 		keyBytes, err = base64.StdEncoding.DecodeString(keyData)
 		if err != nil {
+			s.logger.Error("fetchCertificate: error decoding key data", tag.Error(err))
 			return nil, fmt.Errorf("TLS private key could not be decoded: %w", err)
 		}
 	}
 
 	cert, err := tls.X509KeyPair(certBytes, keyBytes)
 	if err != nil {
+		s.logger.Error("fetchCertificate: error loading tls certificate", tag.Error(err))
 		return nil, fmt.Errorf("loading tls certificate failed: %v", err)
 	}
 
+	s.logger.Info("fetchCertificate: successfully loaded certificate")
 	return &cert, nil
 }
 

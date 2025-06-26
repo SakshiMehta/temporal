@@ -30,7 +30,6 @@ package adminservice
 
 import (
 	context "context"
-	log "log"
 
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
@@ -340,14 +339,11 @@ func (c *adminServiceClient) GetSearchAttributes(ctx context.Context, in *GetSea
 }
 
 func (c *adminServiceClient) DescribeCluster(ctx context.Context, in *DescribeClusterRequest, opts ...grpc.CallOption) (*DescribeClusterResponse, error) {
-	log.Printf("DescribeCluster called with input: %+v", in)
 	out := new(DescribeClusterResponse)
 	err := c.cc.Invoke(ctx, AdminService_DescribeCluster_FullMethodName, in, out, opts...)
 	if err != nil {
-		log.Printf("DescribeCluster error: %v", err)
 		return nil, err
 	}
-	log.Printf("DescribeCluster response: %+v", out)
 	return out, nil
 }
 

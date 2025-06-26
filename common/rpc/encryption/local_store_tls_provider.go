@@ -142,7 +142,7 @@ func (s *localStoreTlsProvider) GetInternodeClientConfig() (*tls.Config, error) 
 }
 
 func (s *localStoreTlsProvider) GetFrontendClientConfig() (*tls.Config, error) {
-
+	s.logger.Info("GetFrontendClientConfig called")
 	var client *config.ClientTLS
 	var useTLS bool
 	if isSystemWorker(s.settings) {
@@ -152,7 +152,7 @@ func (s *localStoreTlsProvider) GetFrontendClientConfig() (*tls.Config, error) {
 		client = &s.settings.Frontend.Client
 		useTLS = s.settings.Frontend.IsClientEnabled()
 	}
-	return s.getOrCreateConfig(
+	cfg, err := s.getOrCreateConfig(
 		&s.cachedFrontendClientConfig,
 		func() (*tls.Config, error) {
 			return newClientTLSConfig(s.workerCertProvider, client.ServerName,
@@ -160,17 +160,26 @@ func (s *localStoreTlsProvider) GetFrontendClientConfig() (*tls.Config, error) {
 		},
 		useTLS,
 	)
+	if err != nil {
+		s.logger.Error("GetFrontendClientConfig: error getting or creating config", tag.Error(err))
+		return nil, err
+	}
+	if cfg != nil {
+		s.logger.Info("GetFrontendClientConfig: successfully loaded config")
+	} else {
+		s.logger.Info("GetFrontendClientConfig: config is nil (TLS may be disabled)")
+	}
+	return cfg, nil
 }
 
 func (s *localStoreTlsProvider) GetRemoteClusterClientConfig(hostname string) (*tls.Config, error) {
-	s.logger.Info("GetRemoteClusterClientConfig called in localStoreTlsProvider", tag.NewStringTag("hostname", hostname))
-
+	s.logger.Info("GetRemoteClusterClientConfig called", tag.NewStringTag("hostname", hostname))
 	groupTLS, ok := s.settings.RemoteClusters[hostname]
 	if !ok {
+		s.logger.Info("No remote cluster TLS config found for hostname", tag.NewStringTag("hostname", hostname))
 		return nil, nil
 	}
-
-	return s.getOrCreateRemoteClusterClientConfig(
+	cfg, err := s.getOrCreateRemoteClusterClientConfig(
 		hostname,
 		func() (*tls.Config, error) {
 			return newClientTLSConfig(
@@ -182,28 +191,60 @@ func (s *localStoreTlsProvider) GetRemoteClusterClientConfig(hostname string) (*
 		},
 		groupTLS.IsClientEnabled(),
 	)
+	if err != nil {
+		s.logger.Error("GetRemoteClusterClientConfig: error creating or retrieving config", tag.NewStringTag("hostname", hostname), tag.Error(err))
+		return nil, err
+	}
+	if cfg != nil {
+		s.logger.Info("GetRemoteClusterClientConfig: successfully loaded config", tag.NewStringTag("hostname", hostname))
+	} else {
+		s.logger.Info("GetRemoteClusterClientConfig: config is nil (TLS may be disabled)", tag.NewStringTag("hostname", hostname))
+	}
+	return cfg, nil
 }
 
 func (s *localStoreTlsProvider) GetFrontendServerConfig() (*tls.Config, error) {
-	return s.getOrCreateConfig(
+	s.logger.Info("GetFrontendServerConfig called")
+	cfg, err := s.getOrCreateConfig(
 		&s.cachedFrontendServerConfig,
 		func() (*tls.Config, error) {
 			return newServerTLSConfig(s.frontendCertProvider, s.frontendPerHostCertProviderMap, &s.settings.Frontend, s.logger)
 		},
 		s.settings.Frontend.IsServerEnabled())
+	if err != nil {
+		s.logger.Error("GetFrontendServerConfig: error getting or creating config", tag.Error(err))
+		return nil, err
+	}
+	if cfg != nil {
+		s.logger.Info("GetFrontendServerConfig: successfully loaded config")
+	} else {
+		s.logger.Info("GetFrontendServerConfig: config is nil (TLS may be disabled)")
+	}
+	return cfg, nil
 }
 
 func (s *localStoreTlsProvider) GetInternodeServerConfig() (*tls.Config, error) {
-	return s.getOrCreateConfig(
+	s.logger.Info("GetInternodeServerConfig called")
+	cfg, err := s.getOrCreateConfig(
 		&s.cachedInternodeServerConfig,
 		func() (*tls.Config, error) {
 			return newServerTLSConfig(s.internodeCertProvider, nil, &s.settings.Internode, s.logger)
 		},
 		s.settings.Internode.IsServerEnabled())
+	if err != nil {
+		s.logger.Error("GetInternodeServerConfig: error getting or creating config", tag.Error(err))
+		return nil, err
+	}
+	if cfg != nil {
+		s.logger.Info("GetInternodeServerConfig: successfully loaded config")
+	} else {
+		s.logger.Info("GetInternodeServerConfig: config is nil (TLS may be disabled)")
+	}
+	return cfg, nil
 }
 
-func (s *localStoreTlsProvider) GetExpiringCerts(timeWindow time.Duration,
-) (expiring CertExpirationMap, expired CertExpirationMap, err error) {
+func (s *localStoreTlsProvider) GetExpiringCerts(timeWindow time.Duration) (expiring CertExpirationMap, expired CertExpirationMap, err error) {
+	s.logger.Info("GetExpiringCerts called", tag.NewDurationTag("timeWindow", timeWindow))
 
 	expiring = make(CertExpirationMap, 0)
 	expired = make(CertExpirationMap, 0)
@@ -217,16 +258,16 @@ func (s *localStoreTlsProvider) GetExpiringCerts(timeWindow time.Duration,
 	checkError = checkExpiration(s.frontendPerHostCertProviderMap, timeWindow, expiring, expired)
 	err = appendError(err, checkError)
 
+	if err != nil {
+		s.logger.Error("GetExpiringCerts: error checking expiration", tag.Error(err))
+	}
 	return expiring, expired, err
 }
 
-func checkExpiration(
-	provider CertExpirationChecker,
-	timeWindow time.Duration,
-	expiring CertExpirationMap,
-	expired CertExpirationMap,
-) error {
-
+func checkExpiration(provider CertExpirationChecker, timeWindow time.Duration, expiring CertExpirationMap, expired CertExpirationMap) error {
+	if provider == nil {
+		return nil
+	}
 	providerExpiring, providerExpired, err := provider.GetExpiringCerts(timeWindow)
 	mergeMaps(expiring, providerExpiring)
 	mergeMaps(expired, providerExpired)
