@@ -347,13 +347,15 @@ func (s *localStoreCertProvider) fetchCertificate(certFile string, certData stri
 		}
 	}
 
+	s.logger.Info("fetchCertificate: certBytes and keyBytes loaded", tag.NewInt("certBytes_len", len(certBytes)), tag.NewInt("keyBytes_len", len(keyBytes)))
+
 	cert, err := tls.X509KeyPair(certBytes, keyBytes)
 	if err != nil {
 		s.logger.Error("fetchCertificate: error loading tls certificate", tag.Error(err))
 		return nil, fmt.Errorf("loading tls certificate failed: %v", err)
 	}
 
-	s.logger.Info("fetchCertificate: successfully loaded certificate")
+	s.logger.Info("fetchCertificate: successfully loaded certificate", tag.NewInt("certificates_in_pair", len(cert.Certificate)))
 	return &cert, nil
 }
 
