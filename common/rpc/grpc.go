@@ -26,10 +26,14 @@ package rpc
 
 import (
 	"context"
+	"crypto/rsa"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"time"
+
+	"crypto/ecdsa"
+	"crypto/ed25519"
 
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/server/common/headers"
@@ -109,7 +113,41 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 					return fmt.Sprintf("%d", len(tlsConfig.RootCAs.Subjects()))
 				}
 				return "0"
-			}()))
+			}()),
+			tag.NewStringTag("cipher_suites", fmt.Sprintf("%v", tlsConfig.CipherSuites)),
+			tag.NewStringTag("curve_preferences", fmt.Sprintf("%v", tlsConfig.CurvePreferences)),
+			tag.NewStringTag("client_auth", fmt.Sprintf("%v", tlsConfig.ClientAuth)),
+			tag.NewStringTag("client_cas_count", func() string {
+				if tlsConfig.ClientCAs != nil {
+					return fmt.Sprintf("%d", len(tlsConfig.ClientCAs.Subjects()))
+				}
+				return "0"
+			}()),
+			tag.NewStringTag("session_tickets_disabled", fmt.Sprintf("%v", tlsConfig.SessionTicketsDisabled)),
+			tag.NewStringTag("renegotiation", fmt.Sprintf("%v", tlsConfig.Renegotiation)),
+			tag.NewStringTag("cert_key_details", func() string {
+				var details []string
+				for i, cert := range tlsConfig.Certificates {
+					if cert.PrivateKey != nil {
+						switch k := cert.PrivateKey.(type) {
+						case *tls.Certificate:
+							details = append(details, fmt.Sprintf("cert[%d]: tls.Certificate", i))
+						case *rsa.PrivateKey:
+							details = append(details, fmt.Sprintf("cert[%d]: RSA %d bits", i, k.N.BitLen()))
+						case *ecdsa.PrivateKey:
+							details = append(details, fmt.Sprintf("cert[%d]: ECDSA %d bits", i, k.Params().BitSize))
+						case ed25519.PrivateKey:
+							details = append(details, fmt.Sprintf("cert[%d]: Ed25519", i))
+						default:
+							details = append(details, fmt.Sprintf("cert[%d]: unknown key type %T", i, k))
+						}
+					} else {
+						details = append(details, fmt.Sprintf("cert[%d]: no private key", i))
+					}
+				}
+				return fmt.Sprintf("%v", details)
+			}()),
+		)
 		grpcSecureOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
 

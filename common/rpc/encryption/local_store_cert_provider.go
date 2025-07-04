@@ -239,8 +239,32 @@ func (s *localStoreCertProvider) getCerts() (*certCache, error) {
 }
 
 func (s *localStoreCertProvider) loadCerts() (*certCache, error) {
+	s.logger.Info(fmt.Sprintf("loadCerts: called tls_enabled=%v is_legacy_worker=%v", s.isTLSEnabled(), s.isLegacyWorkerConfig),
+		tag.NewStringTag("server_cert_file", func() string {
+			if s.tlsSettings != nil {
+				return s.tlsSettings.Server.CertFile
+			} else {
+				return ""
+			}
+		}()),
+		tag.NewStringTag("server_key_file", func() string {
+			if s.tlsSettings != nil {
+				return s.tlsSettings.Server.KeyFile
+			} else {
+				return ""
+			}
+		}()),
+		tag.NewStringTag("client_ca_files", func() string {
+			if s.tlsSettings != nil {
+				return fmt.Sprintf("%v", s.tlsSettings.Server.ClientCAFiles)
+			} else {
+				return ""
+			}
+		}()),
+	)
+
 	if !s.isTLSEnabled() {
-		s.logger.Info("loadCerts: TLS not enabled")
+		s.logger.Info("loadCerts: TLS not enabled, returning nil")
 		return nil, nil
 	}
 
@@ -248,12 +272,24 @@ func (s *localStoreCertProvider) loadCerts() (*certCache, error) {
 	var err error
 
 	if s.tlsSettings != nil {
-		s.logger.Info("loadCerts: loading server cert")
+		s.logger.Info("loadCerts: loading server cert",
+			tag.NewStringTag("cert_file", s.tlsSettings.Server.CertFile),
+			tag.NewStringTag("key_file", s.tlsSettings.Server.KeyFile),
+		)
 		newCerts.serverCert, err = s.fetchCertificate(s.tlsSettings.Server.CertFile, s.tlsSettings.Server.CertData,
 			s.tlsSettings.Server.KeyFile, s.tlsSettings.Server.KeyData)
 		if err != nil {
 			s.logger.Error("loadCerts: error loading server cert", tag.Error(err))
 			return nil, err
+		}
+		if newCerts.serverCert != nil {
+			s.logger.Info("loadCerts: server cert loaded",
+				tag.NewStringTag("cert_file", s.tlsSettings.Server.CertFile),
+				tag.NewStringTag("key_file", s.tlsSettings.Server.KeyFile),
+				tag.NewInt("cert_chain_len", len(newCerts.serverCert.Certificate)),
+			)
+		} else {
+			s.logger.Warn("loadCerts: server cert is nil")
 		}
 
 		certPool, certs, err := s.fetchCAs(s.tlsSettings.Server.ClientCAFiles, s.tlsSettings.Server.ClientCAData,
@@ -264,17 +300,23 @@ func (s *localStoreCertProvider) loadCerts() (*certCache, error) {
 		}
 		newCerts.clientCAPool = certPool
 		newCerts.clientCACerts = certs
+		if certPool != nil {
+			s.logger.Info("loadCerts: client CA pool loaded",
+				tag.NewStringTag("client_ca_files", fmt.Sprintf("%v", s.tlsSettings.Server.ClientCAFiles)),
+				tag.NewInt("num_client_cas", len(certs)),
+			)
+		} else {
+			s.logger.Warn("loadCerts: client CA pool is nil")
+		}
 	}
 
 	if s.isLegacyWorkerConfig {
 		newCerts.workerCert = newCerts.serverCert
 	} else {
 		if s.workerTLSSettings != nil {
-			s.logger.Info("loadCerts: loading worker cert")
 			newCerts.workerCert, err = s.fetchCertificate(s.workerTLSSettings.CertFile, s.workerTLSSettings.CertData,
 				s.workerTLSSettings.KeyFile, s.workerTLSSettings.KeyData)
 			if err != nil {
-				s.logger.Error("loadCerts: error loading worker cert", tag.Error(err))
 				return nil, err
 			}
 		}
@@ -287,6 +329,13 @@ func (s *localStoreCertProvider) loadCerts() (*certCache, error) {
 	}
 	newCerts.serverCAPool = nonWorkerPool
 	newCerts.serverCACerts = nonWorkerCerts
+	if nonWorkerPool != nil {
+		s.logger.Info("loadCerts: non-worker server CA pool loaded",
+			tag.NewInt("num_nonworker_cas", len(nonWorkerCerts)),
+		)
+	} else {
+		s.logger.Warn("loadCerts: non-worker server CA pool is nil")
+	}
 
 	workerPool, workerCerts, err := s.loadServerCACerts(true)
 	if err != nil {
@@ -295,8 +344,23 @@ func (s *localStoreCertProvider) loadCerts() (*certCache, error) {
 	}
 	newCerts.serverCAsWorkerPool = workerPool
 	newCerts.serverCACertsWorker = workerCerts
+	if workerPool != nil {
+		// removed worker CA pool log
+	} else {
+		// removed worker CA pool warn log
+	}
 
-	s.logger.Info("loadCerts: finished loading all certs")
+	s.logger.Info(fmt.Sprintf("loadCerts: finished loading all certs tls_enabled=%v", s.isTLSEnabled()),
+		tag.NewInt("server_cert_chain_len", func() int {
+			if newCerts.serverCert != nil {
+				return len(newCerts.serverCert.Certificate)
+			} else {
+				return 0
+			}
+		}()),
+		tag.NewInt("num_client_cas", len(newCerts.clientCACerts)),
+		tag.NewInt("num_nonworker_cas", len(newCerts.serverCACerts)),
+	)
 	return &newCerts, nil
 }
 
