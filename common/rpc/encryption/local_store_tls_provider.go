@@ -449,7 +449,10 @@ func newClientTLSConfig(
 
 	if isAuthRequired {
 		fmt.Printf("%s, mTLS required, will fetch client cert\n", logMsg)
+		fmt.Printf("isAuthRequired Entered now")
+
 		getCert = func() (*tls.Certificate, error) {
+			fmt.Printf("getCert Entered now")
 			cert, err := clientProvider.FetchClientCertificate(isWorker)
 			if err != nil {
 				fmt.Printf("%s, error fetching client cert: %v\n", logMsg, err)
@@ -459,9 +462,13 @@ func newClientTLSConfig(
 				fmt.Printf("%s, client auth required but no certificate provided\n", logMsg)
 				return nil, fmt.Errorf("client auth required, but no certificate provided")
 			}
+			fmt.Printf("getCert exiting now")
+
 			fmt.Printf("%s, client cert loaded\n", logMsg)
 			return cert, nil
 		}
+		fmt.Printf("getCert exiting now")
+
 	}
 
 	tlsCfg := auth.NewDynamicTLSClientConfig(

@@ -54,6 +54,7 @@ func NewTLSConfigForServer(
 	serverName string,
 	enableHostVerification bool,
 ) *tls.Config {
+	fmt.Printf("NewTLSConfigForServer called: serverName=%s, enableHostVerification=%v\n", serverName, enableHostVerification)
 	c := NewEmptyTLSConfig()
 	c.ServerName = serverName
 	c.InsecureSkipVerify = !enableHostVerification
@@ -66,10 +67,17 @@ func NewDynamicTLSClientConfig(
 	serverName string,
 	enableHostVerification bool,
 ) *tls.Config {
+	fmt.Printf("NewDynamicTLSClientConfig called: serverName=%s, enableHostVerification=%v, getCert_set=%v\n", serverName, enableHostVerification, getCert != nil)
+	if rootCAs != nil {
+		fmt.Printf("NewDynamicTLSClientConfig: rootCAs count=%d\n", len(rootCAs.Subjects()))
+	} else {
+		fmt.Printf("NewDynamicTLSClientConfig: rootCAs is nil\n")
+	}
 	c := NewTLSConfigForServer(serverName, enableHostVerification)
 
 	if getCert != nil {
 		c.GetClientCertificate = func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			fmt.Printf("NewDynamicTLSClientConfig: GetClientCertificate called\n")
 			return getCert()
 		}
 	}
