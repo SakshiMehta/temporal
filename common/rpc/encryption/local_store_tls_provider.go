@@ -467,7 +467,7 @@ func newClientTLSConfig(
 			fmt.Printf("%s, client cert loaded\n", logMsg)
 			return cert, nil
 		}
-		fmt.Printf("getCert exiting now")
+		fmt.Printf("isAuthRequired exiting now")
 
 	}
 
