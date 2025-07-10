@@ -433,35 +433,45 @@ func newClientTLSConfig(
 	isWorker bool,
 	enableHostVerification bool,
 ) (*tls.Config, error) {
-	// Optional ServerCA for client if not already trusted by host
+	logMsg := fmt.Sprintf("newClientTLSConfig called: serverName=%s, isAuthRequired=%v, isWorker=%v, enableHostVerification=%v", serverName, isAuthRequired, isWorker, enableHostVerification)
+	var caCount int
 	serverCa, err := clientProvider.FetchServerRootCAsForClient(isWorker)
+	if serverCa != nil {
+		caCount = len(serverCa.Subjects())
+	}
 	if err != nil {
+		fmt.Printf("%s, error loading CA: %v\n", logMsg, err)
 		return nil, fmt.Errorf("failed to load client ca: %v", err)
 	}
+	fmt.Printf("%s, CA pool loaded, caCount=%d\n", logMsg, caCount)
 
 	var getCert tlsCertFetcher
 
-	// mTLS enabled, present certificate
 	if isAuthRequired {
+		fmt.Printf("%s, mTLS required, will fetch client cert\n", logMsg)
 		getCert = func() (*tls.Certificate, error) {
 			cert, err := clientProvider.FetchClientCertificate(isWorker)
 			if err != nil {
+				fmt.Printf("%s, error fetching client cert: %v\n", logMsg, err)
 				return nil, err
 			}
-
 			if cert == nil {
+				fmt.Printf("%s, client auth required but no certificate provided\n", logMsg)
 				return nil, fmt.Errorf("client auth required, but no certificate provided")
 			}
+			fmt.Printf("%s, client cert loaded\n", logMsg)
 			return cert, nil
 		}
 	}
 
-	return auth.NewDynamicTLSClientConfig(
+	tlsCfg := auth.NewDynamicTLSClientConfig(
 		getCert,
 		serverCa,
 		serverName,
 		enableHostVerification,
-	), nil
+	)
+	fmt.Printf("%s, returning tls.Config=%p for serverName=%s\n", logMsg, tlsCfg, serverName)
+	return tlsCfg, nil
 }
 
 func (s *localStoreTlsProvider) timerCallback() {
