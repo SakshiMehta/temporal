@@ -63,6 +63,7 @@ func NewTLSConfigForServer(
 
 func NewDynamicTLSClientConfig(
 	getCert func() (*tls.Certificate, error),
+	cert *tls.Certificate,
 	rootCAs *x509.CertPool,
 	serverName string,
 	enableHostVerification bool,
@@ -80,6 +81,11 @@ func NewDynamicTLSClientConfig(
 			fmt.Printf("NewDynamicTLSClientConfig: GetClientCertificate called\n")
 			return getCert()
 		}
+	}
+	if cert != nil {
+		c.Certificates = []tls.Certificate{*cert}
+	} else {
+		c.Certificates = nil
 	}
 	c.RootCAs = rootCAs
 
