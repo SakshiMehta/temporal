@@ -63,7 +63,6 @@ func NewTLSConfigForServer(
 
 func NewDynamicTLSClientConfig(
 	getCert func() (*tls.Certificate, error),
-	cert *tls.Certificate,
 	rootCAs *x509.CertPool,
 	serverName string,
 	enableHostVerification bool,
@@ -82,11 +81,7 @@ func NewDynamicTLSClientConfig(
 			return getCert()
 		}
 	}
-	if cert != nil {
-		c.Certificates = []tls.Certificate{*cert}
-	} else {
-		c.Certificates = nil
-	}
+
 	c.RootCAs = rootCAs
 
 	return c
@@ -118,11 +113,15 @@ func tlsCN(state tls.ConnectionState) string {
 }
 
 func NewTLSConfig(temporalTls *TLS) (*tls.Config, error) {
+	fmt.Printf("NewTLSConfig called\n")
 	if temporalTls == nil || !temporalTls.Enabled {
+		fmt.Printf("NewTLSConfig: TLS not enabled or temporalTls is nil, returning nil\n")
 		return nil, nil
 	}
+	fmt.Printf("NewTLSConfig: TLS is enabled, validating temporalTls\n")
 	err := validateTemporalTls(temporalTls)
 	if err != nil {
+		fmt.Printf("NewTLSConfig: validateTemporalTls error: %v\n", err)
 		return nil, err
 	}
 
@@ -130,27 +129,39 @@ func NewTLSConfig(temporalTls *TLS) (*tls.Config, error) {
 		InsecureSkipVerify: !temporalTls.EnableHostVerification,
 	}
 	if temporalTls.ServerName != "" {
+		fmt.Printf("NewTLSConfig: setting ServerName to %s\n", temporalTls.ServerName)
 		tlsConfig.ServerName = temporalTls.ServerName
 	}
 
 	// Load CA cert
+	fmt.Printf("NewTLSConfig: loading CA certs\n")
 	caCertPool, err := parseCAs(temporalTls)
 	if err != nil {
+		fmt.Printf("NewTLSConfig: error loading CA certs: %v\n", err)
 		return nil, err
 	}
 	if caCertPool != nil {
+		fmt.Printf("NewTLSConfig: CA cert pool loaded\n")
 		tlsConfig.RootCAs = caCertPool
+	} else {
+		fmt.Printf("NewTLSConfig: no CA cert pool loaded\n")
 	}
 
 	// Load client cert
+	fmt.Printf("NewTLSConfig: loading client certificate\n")
 	clientCert, err := parseClientCert(temporalTls)
 	if err != nil {
+		fmt.Printf("NewTLSConfig: error loading client certificate: %v\n", err)
 		return nil, err
 	}
 	if clientCert != nil {
+		fmt.Printf("NewTLSConfig: client certificate loaded\n")
 		tlsConfig.Certificates = []tls.Certificate{*clientCert}
+	} else {
+		fmt.Printf("NewTLSConfig: no client certificate loaded\n")
 	}
 
+	fmt.Printf("NewTLSConfig: returning tls.Config\n")
 	return tlsConfig, nil
 }
 
@@ -224,40 +235,52 @@ func parseCertsFromPEM(pemCerts []byte) ([]*x509.Certificate, error) {
 }
 
 func parseClientCert(temporalTls *TLS) (*tls.Certificate, error) {
+	fmt.Printf("parseClientCert called\n")
 	var certBytes []byte
 	var keyBytes []byte
 	var err error
 	if temporalTls.CertFile != "" {
+		fmt.Printf("parseClientCert: loading certificate from file: %s\n", temporalTls.CertFile)
 		certBytes, err = os.ReadFile(temporalTls.CertFile)
 		if err != nil {
+			fmt.Printf("parseClientCert: error reading certificate file: %v\n", err)
 			return nil, fmt.Errorf("%w: %s (%w)", ErrTLSConfig, "unable to read client certificate file", err)
 		}
 	} else if temporalTls.CertData != "" {
+		fmt.Printf("parseClientCert: decoding certificate from data\n")
 		certBytes, err = base64.StdEncoding.DecodeString(temporalTls.CertData)
 		if err != nil {
+			fmt.Printf("parseClientCert: error decoding certificate data: %v\n", err)
 			return nil, fmt.Errorf("%w: %s (%w)", ErrTLSConfig, "unable to decode client certificate", err)
 		}
 	}
 
 	if temporalTls.KeyFile != "" {
+		fmt.Printf("parseClientCert: loading key from file: %s\n", temporalTls.KeyFile)
 		keyBytes, err = os.ReadFile(temporalTls.KeyFile)
 		if err != nil {
+			fmt.Printf("parseClientCert: error reading key file: %v\n", err)
 			return nil, fmt.Errorf("%w: %s (%w)", ErrTLSConfig, "unable to read client certificate private key file", err)
 		}
 	} else if temporalTls.KeyData != "" {
+		fmt.Printf("parseClientCert: decoding key from data\n")
 		keyBytes, err = base64.StdEncoding.DecodeString(temporalTls.KeyData)
 		if err != nil {
+			fmt.Printf("parseClientCert: error decoding key data: %v\n", err)
 			return nil, fmt.Errorf("%w: %s (%w)", ErrTLSConfig, "unable to decode client certificate private key", err)
 		}
 	}
 
 	if len(certBytes) > 0 {
+		fmt.Printf("parseClientCert: creating x509 key pair\n")
 		clientCert, err := tls.X509KeyPair(certBytes, keyBytes)
 		if err != nil {
+			fmt.Printf("parseClientCert: error generating x509 key pair: %v\n", err)
 			return nil, fmt.Errorf("%w: %s (%w)", ErrTLSConfig, "unable to generate x509 key pair", err)
 		}
-
+		fmt.Printf("parseClientCert: successfully created x509 key pair\n")
 		return &clientCert, nil
 	}
+	fmt.Printf("parseClientCert: no certificate bytes loaded, returning nil\n")
 	return nil, nil
 }

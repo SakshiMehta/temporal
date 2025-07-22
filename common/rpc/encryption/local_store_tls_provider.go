@@ -434,6 +434,8 @@ func newClientTLSConfig(
 	enableHostVerification bool,
 ) (*tls.Config, error) {
 	logMsg := fmt.Sprintf("newClientTLSConfig called: serverName=%s, isAuthRequired=%v, isWorker=%v, enableHostVerification=%v", serverName, isAuthRequired, isWorker, enableHostVerification)
+	logMsgo := fmt.Sprintf("newClientTLSConfig called outside: serverName=%s, isAuthRequired=%v, isWorker=%v, enableHostVerification=%v", serverName, isAuthRequired, isWorker, enableHostVerification)
+
 	var caCount int
 	serverCa, err := clientProvider.FetchServerRootCAsForClient(isWorker)
 	if serverCa != nil {
@@ -446,6 +448,16 @@ func newClientTLSConfig(
 	fmt.Printf("%s, CA pool loaded, caCount=%d\n", logMsg, caCount)
 
 	var getCert tlsCertFetcher
+	cert, err := clientProvider.FetchClientCertificate(isWorker)
+	if err != nil {
+		fmt.Printf("%s, error fetching client cert: %v\n", logMsgo, err)
+		return nil, err
+	}
+	if cert == nil {
+		fmt.Printf("%s, client auth required but no certificate provided\n", logMsgo)
+		return nil, fmt.Errorf("client auth required, but no certificate provided")
+	}
+	fmt.Printf("%s, client cert loaded\n", logMsgo)
 
 	if isAuthRequired {
 		fmt.Printf("%s, mTLS required, will fetch client cert\n", logMsg)
@@ -477,6 +489,18 @@ func newClientTLSConfig(
 		serverName,
 		enableHostVerification,
 	)
+
+	// Force test the GetClientCertificate callback
+	if tlsCfg.GetClientCertificate != nil {
+		fmt.Printf("%s, testing GetClientCertificate callback\n", logMsg)
+		testCert, err := tlsCfg.GetClientCertificate(nil)
+		if err != nil {
+			fmt.Printf("%s, GetClientCertificate test failed: %v\n", logMsg, err)
+		} else {
+			fmt.Printf("%s, GetClientCertificate test succeeded, cert=%p\n", logMsg, testCert)
+		}
+	}
+
 	fmt.Printf("%s, returning tls.Config=%p for serverName=%s\n", logMsg, tlsCfg, serverName)
 	return tlsCfg, nil
 }
