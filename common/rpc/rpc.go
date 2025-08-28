@@ -261,7 +261,7 @@ func (d *RPCFactory) CreateRemoteFrontendGRPCConnection(rpcAddress string) *grpc
 				tag.NewStringTag("min_version", fmt.Sprintf("%d", tlsClientConfig.MinVersion)),
 				tag.NewStringTag("max_version", fmt.Sprintf("%d", tlsClientConfig.MaxVersion)),
 				tag.NewBoolTag("insecure_skip_verify", tlsClientConfig.InsecureSkipVerify),
-				tag.NewStringTag("cert_count", fmt.Sprintf("%d", len(tlsClientConfig.))),
+				tag.NewStringTag("cert_count", fmt.Sprintf("%d", len(tlsClientConfig.Certificates))),
 				tag.NewStringTag("root_ca_count", func() string {
 					if tlsClientConfig.RootCAs != nil {
 						return fmt.Sprintf("%d", len(tlsClientConfig.RootCAs.Subjects()))

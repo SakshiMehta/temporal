@@ -89,6 +89,7 @@ import (
 	"go.temporal.io/server/service/worker/dlq"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -1329,12 +1330,17 @@ func (adh *AdminHandler) AddOrUpdateRemoteCluster(
 	start := time.Now()
 	frontendAddress := request.GetFrontendAddress()
 	requestID := uuid.New()
+	correlationID := fmt.Sprintf("temporal-cross-cluster-%s", requestID)
+
+	// Add correlation ID to context for propagation
+	ctx = metadata.AppendToOutgoingContext(ctx, "x-temporal-correlation-id", correlationID)
 
 	adh.logger.Info("Starting AddOrUpdateRemoteCluster request in admin handler",
 		tag.NewStringTag("frontend_address", frontendAddress),
 		tag.NewBoolTag("enable_connection", request.GetEnableRemoteClusterConnection()),
 		tag.NewStringTag("request_type", "admin_upsert"),
 		tag.NewStringTag("request_id", requestID),
+		tag.NewStringTag("correlation_id", correlationID),
 		tag.NewStringTag("request_timestamp", start.Format(time.RFC3339)))
 
 	// Handle passthrough address
@@ -1358,6 +1364,7 @@ func (adh *AdminHandler) AddOrUpdateRemoteCluster(
 		tag.NewStringTag("frontend_address", frontendAddress),
 		tag.NewStringTag("timeout", admin.DefaultTimeout.String()),
 		tag.NewStringTag("large_timeout", admin.DefaultLargeTimeout.String()),
+		tag.NewStringTag("correlation_id", correlationID),
 		tag.NewStringTag("request_type", "admin_client_creation"))
 	adminClient := adh.clientFactory.NewRemoteAdminClientWithTimeout(
 		frontendAddress,
@@ -1368,6 +1375,7 @@ func (adh *AdminHandler) AddOrUpdateRemoteCluster(
 	// Fetch cluster metadata from remote cluster
 	adh.logger.Info("Fetching cluster metadata from remote cluster in admin handler",
 		tag.NewStringTag("frontend_address", frontendAddress),
+		tag.NewStringTag("correlation_id", correlationID),
 		tag.NewStringTag("request_type", "admin_DescribeCluster"),
 		tag.NewStringTag("connection_type", "remote"))
 	resp, err := adminClient.DescribeCluster(ctx, &adminservice.DescribeClusterRequest{})
@@ -1384,6 +1392,7 @@ func (adh *AdminHandler) AddOrUpdateRemoteCluster(
 	adh.logger.Info("Successfully fetched cluster metadata in admin handler",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
 		tag.NewStringTag("cluster_id", resp.GetClusterId()),
+		tag.NewStringTag("correlation_id", correlationID),
 		tag.NewInt32("history_shard_count", resp.GetHistoryShardCount()),
 		tag.NewInt64("failover_version_increment", resp.GetFailoverVersionIncrement()),
 		tag.NewInt64("initial_failover_version", resp.GetInitialFailoverVersion()),
@@ -1485,6 +1494,7 @@ func (adh *AdminHandler) AddOrUpdateRemoteCluster(
 	adh.logger.Info("Successfully completed AddOrUpdateRemoteCluster operation in admin handler",
 		tag.NewStringTag("cluster_name", resp.GetClusterName()),
 		tag.NewStringTag("cluster_id", resp.GetClusterId()),
+		tag.NewStringTag("correlation_id", correlationID),
 		tag.NewBoolTag("is_new_cluster", updateRequestVersion == 0),
 		tag.NewStringTag("frontend_address", frontendAddress),
 		tag.NewBoolTag("connection_enabled", request.GetEnableRemoteClusterConnection()),

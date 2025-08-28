@@ -255,6 +255,9 @@ func GrpcServerOptionsProvider(
 	if err != nil {
 		logger.Fatal("creating gRPC server options failed", tag.Error(err))
 	}
+	// Create correlation interceptor for cross-cluster request tracking
+	correlationInterceptor := interceptor.NewCorrelationInterceptor(logger)
+
 	unaryInterceptors := []grpc.UnaryServerInterceptor{
 		// Order or interceptors is important
 		// Mask error interceptor should be the most outer interceptor since it handle the errors format
@@ -262,6 +265,7 @@ func GrpcServerOptionsProvider(
 		maskInternalErrorDetailsInterceptor.Intercept,
 		rpc.ServiceErrorInterceptor,
 		rpc.NewFrontendServiceErrorInterceptor(logger),
+		correlationInterceptor.Intercept, // Log correlation IDs early in the chain
 		namespaceValidatorInterceptor.NamespaceValidateIntercept,
 		namespaceLogInterceptor.Intercept, // TODO: Deprecate this with a outer custom interceptor
 		metrics.NewServerMetricsContextInjectorInterceptor(),

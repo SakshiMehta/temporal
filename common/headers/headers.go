@@ -54,6 +54,8 @@ var (
 		CallerNameHeaderName,
 		CallerTypeHeaderName,
 		CallOriginHeaderName,
+		"x-client-trace-id",         // Custom trace ID header for debugging
+		"x-temporal-correlation-id", // Cross-cluster correlation ID for linking logs
 	}
 )
 
