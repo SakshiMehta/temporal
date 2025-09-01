@@ -31,7 +31,6 @@ import (
 	"io"
 	"maps"
 	"net"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1342,23 +1341,6 @@ func (adh *AdminHandler) AddOrUpdateRemoteCluster(
 		tag.NewStringTag("request_id", requestID),
 		tag.NewStringTag("correlation_id", correlationID),
 		tag.NewStringTag("request_timestamp", start.Format(time.RFC3339)))
-
-	// Handle passthrough address
-	if u, err := url.Parse(frontendAddress); err == nil && u.Scheme == "passthrough" {
-		adh.logger.Info("Processing passthrough address in admin handler",
-			tag.NewStringTag("original_address", frontendAddress),
-			tag.NewStringTag("scheme", u.Scheme),
-			tag.NewStringTag("path", u.Path),
-			tag.NewStringTag("host", u.Host),
-			tag.NewStringTag("request_type", "admin_passthrough_parsing"))
-		// Extract the actual address from the passthrough URI and maintain the passthrough scheme
-		target := strings.TrimPrefix(u.Path, "/")
-		frontendAddress = "passthrough:///" + target
-		adh.logger.Info("Converted passthrough address in admin handler",
-			tag.NewStringTag("new_address", frontendAddress),
-			tag.NewStringTag("target", target),
-			tag.NewStringTag("request_type", "admin_passthrough_conversion"))
-	}
 
 	adh.logger.Info("Creating remote admin client in admin handler",
 		tag.NewStringTag("frontend_address", frontendAddress),

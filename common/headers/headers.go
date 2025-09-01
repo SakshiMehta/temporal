@@ -26,6 +26,7 @@ package headers
 
 import (
 	"context"
+	"fmt"
 
 	"google.golang.org/grpc/metadata"
 )
@@ -56,6 +57,9 @@ var (
 		CallOriginHeaderName,
 		"x-client-trace-id",         // Custom trace ID header for debugging
 		"x-temporal-correlation-id", // Cross-cluster correlation ID for linking logs
+		"x-request-id",              // Request ID for tracing individual requests
+		"x-b3-traceid",              // B3 tracing header for distributed tracing
+		"x-b3-sampled",              // B3 sampling decision for tracing
 	}
 )
 
@@ -79,10 +83,33 @@ func GetValues(ctx context.Context, headerNames ...string) []string {
 func Propagate(ctx context.Context) context.Context {
 	headersToAppend := make([]string, 0, len(propagateHeaders)*2)
 	mdOutgoing, mdOutgoingExist := metadata.FromOutgoingContext(ctx)
+	propagatedHeaders := make(map[string]string)
+
 	for _, headerName := range propagateHeaders {
 		if incomingValue := metadata.ValueFromIncomingContext(ctx, headerName); len(incomingValue) > 0 && len(mdOutgoing.Get(headerName)) == 0 {
 			headersToAppend = append(headersToAppend, headerName, incomingValue[0])
+			propagatedHeaders[headerName] = incomingValue[0]
 		}
+	}
+
+	// Log header propagation for tracing
+	if len(propagatedHeaders) > 0 {
+		// Extract request ID for correlation
+		requestID := propagatedHeaders["x-request-id"]
+		if requestID == "" {
+			requestID = "unknown"
+		}
+
+		// Log the propagated headers
+		headerList := make([]string, 0, len(propagatedHeaders))
+		for k, v := range propagatedHeaders {
+			headerList = append(headerList, fmt.Sprintf("%s=%s", k, v))
+		}
+
+		// This will be logged by the service's logger when available
+		// For now, we'll use a simple approach that can be enhanced with proper logger injection
+		_ = requestID  // Placeholder for future logger integration
+		_ = headerList // Placeholder for future logger integration
 	}
 	if headersToAppend != nil {
 		if mdOutgoingExist {

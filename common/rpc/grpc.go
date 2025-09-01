@@ -30,6 +30,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"crypto/ecdsa"
@@ -93,10 +94,6 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 		tag.NewStringTag("hostName", hostName),
 		tag.NewBoolTag("tls_enabled", tlsConfig != nil))
 
-	newHost := "passthrough:" + hostName
-	logger.Info("Normalized passthrough address", tag.NewStringTag("original_hostName", hostName), tag.NewStringTag("new_hostName", newHost))
-	hostName = newHost
-
 	var grpcSecureOpt grpc.DialOption
 	if tlsConfig == nil {
 		logger.Info("Dial: Using insecure credentials (no TLS)", tag.NewStringTag("hostName", hostName))
@@ -114,6 +111,7 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 				}
 				return "0"
 			}()),
+
 			tag.NewStringTag("cipher_suites", fmt.Sprintf("%v", tlsConfig.CipherSuites)),
 			tag.NewStringTag("curve_preferences", fmt.Sprintf("%v", tlsConfig.CurvePreferences)),
 			tag.NewStringTag("client_auth", fmt.Sprintf("%v", tlsConfig.ClientAuth)),
@@ -165,6 +163,11 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 	}
 	cp.Backoff.MaxDelay = MaxBackoffDelay
 
+	// Log Authority header setting for tracing
+	logger.Info("Dial: Setting Authority header for HTTP/2 RFC 9113 compliance",
+		tag.NewStringTag("authority", hostName),
+		tag.NewStringTag("reason", "HTTP/2 RFC 9113 Section 8.3.1 requires port for non-standard ports"))
+
 	dialOptions := []grpc.DialOption{
 		grpcSecureOpt,
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxInternodeRecvPayloadSize)),
@@ -179,6 +182,9 @@ func Dial(hostName string, tlsConfig *tls.Config, logger log.Logger, opts ...grp
 		grpc.WithDefaultServiceConfig(DefaultServiceConfig),
 		grpc.WithDisableServiceConfig(),
 		grpc.WithConnectParams(cp),
+		// Set Authority to include port for non-standard ports as required by HTTP/2 RFC 9113
+		// HTTP/2 RFC 9113 Section 8.3.1: :authority MUST include port if not default for scheme
+		grpc.WithAuthority(hostName),
 	}
 	dialOptions = append(dialOptions, opts...)
 
@@ -218,7 +224,42 @@ func headersInterceptor(
 	invoker grpc.UnaryInvoker,
 	opts ...grpc.CallOption,
 ) error {
+	// Extract tracing headers before propagation for logging
+	requestID := ""
+	traceID := ""
+	clientTraceID := ""
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if values := md.Get("x-request-id"); len(values) > 0 {
+			requestID = values[0]
+		}
+		if values := md.Get("x-b3-traceid"); len(values) > 0 {
+			traceID = values[0]
+		}
+		if values := md.Get("x-client-trace-id"); len(values) > 0 {
+			clientTraceID = values[0]
+		}
+	}
+
+	// Log the outgoing gRPC call with tracing headers
+	fmt.Printf("gRPC outgoing call: method=%s, x-request-id=%s, x-b3-traceid=%s, x-client-trace-id=%s, target=%s\n",
+		method, requestID, traceID, clientTraceID, cc.Target())
+
+	// Propagate headers to outgoing context
 	ctx = headers.Propagate(ctx)
+
+	// Log after propagation to confirm headers are set
+	if md, ok := metadata.FromOutgoingContext(ctx); ok {
+		outgoingHeaders := make([]string, 0)
+		for _, header := range []string{"x-request-id", "x-b3-traceid", "x-client-trace-id"} {
+			if values := md.Get(header); len(values) > 0 {
+				outgoingHeaders = append(outgoingHeaders, fmt.Sprintf("%s=%s", header, values[0]))
+			}
+		}
+		if len(outgoingHeaders) > 0 {
+			fmt.Printf("gRPC headers propagated: %s\n", strings.Join(outgoingHeaders, ", "))
+		}
+	}
+
 	return invoker(ctx, method, req, reply, cc, opts...)
 }
 
