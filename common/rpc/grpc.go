@@ -30,7 +30,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"crypto/ecdsa"
@@ -224,41 +223,8 @@ func headersInterceptor(
 	invoker grpc.UnaryInvoker,
 	opts ...grpc.CallOption,
 ) error {
-	// Extract tracing headers before propagation for logging
-	requestID := ""
-	traceID := ""
-	clientTraceID := ""
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		if values := md.Get("x-request-id"); len(values) > 0 {
-			requestID = values[0]
-		}
-		if values := md.Get("x-b3-traceid"); len(values) > 0 {
-			traceID = values[0]
-		}
-		if values := md.Get("x-client-trace-id"); len(values) > 0 {
-			clientTraceID = values[0]
-		}
-	}
-
-	// Log the outgoing gRPC call with tracing headers
-	fmt.Printf("gRPC outgoing call: method=%s, x-request-id=%s, x-b3-traceid=%s, x-client-trace-id=%s, target=%s\n",
-		method, requestID, traceID, clientTraceID, cc.Target())
-
 	// Propagate headers to outgoing context
 	ctx = headers.Propagate(ctx)
-
-	// Log after propagation to confirm headers are set
-	if md, ok := metadata.FromOutgoingContext(ctx); ok {
-		outgoingHeaders := make([]string, 0)
-		for _, header := range []string{"x-request-id", "x-b3-traceid", "x-client-trace-id"} {
-			if values := md.Get(header); len(values) > 0 {
-				outgoingHeaders = append(outgoingHeaders, fmt.Sprintf("%s=%s", header, values[0]))
-			}
-		}
-		if len(outgoingHeaders) > 0 {
-			fmt.Printf("gRPC headers propagated: %s\n", strings.Join(outgoingHeaders, ", "))
-		}
-	}
 
 	return invoker(ctx, method, req, reply, cc, opts...)
 }
